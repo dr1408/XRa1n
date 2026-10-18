@@ -1,0 +1,244 @@
+name: Patch RestoreRamDisk
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Apple product type
+        required: true
+        default: iPhone11,8
+      build:
+        description: iOS build
+        required: true
+        default: 22H374
+      identity:
+        description: Restore identity containing the target ramdisk
+        required: true
+        default: Erase
+
+permissions:
+  contents: read
+
+concurrency:
+  group: patch-ramdisk-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVICE: ${{ inputs.device }}
+      BUILD: ${{ inputs.build }}
+      IDENTITY: ${{ inputs.identity }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same installation method used by the firmware/KPF tooling: use the
+      # maintained Homebrew tap rather than downloading an unpinned executable.
+      - name: Install firmware tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install blacktop/tap/ipsw
+          brew install ldid-procursus
+          ipsw version
+          command -v ldid
+
+      - name: Resolve firmware URL
+        id: firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/download work/output
+          URL="$(ipsw download appledb --no-color \
+            --os iOS \
+            --device "$DEVICE" \
+            --build "$BUILD" \
+            --urls \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^https:\/\//) { print $i; exit } }')"
+          test -n "$URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Resolved $DEVICE $BUILD firmware URL"
+          ipsw info --remote "$URL" > work/output/firmware-info.txt
+
+      - name: Resolve and download only RestoreRamDisk
+        id: ramdisk
+        shell: bash
+        env:
+          URL: ${{ steps.firmware.outputs.url }}
+        run: |
+          set -euo pipefail
+          # Restore ramdisks normally have numbered ZIP member names. Resolve
+          # the exact member from BuildManifest instead of guessing its name.
+          ipsw extract --no-color \
+            --remote \
+            --pattern '(^|/)BuildManifest\.plist$' \
+            --output work/manifest \
+            "$URL"
+
+          MANIFEST="$(find work/manifest -type f -name BuildManifest.plist -print -quit)"
+          test -n "$MANIFEST"
+          # Do not use plutil JSON conversion here: BuildManifest can contain
+          # plist object types which plutil refuses to represent as JSON.
+          RAMDISK_PATH="$(python3 - "$MANIFEST" "$IDENTITY" <<'PY'
+          import plistlib
+          import sys
+
+          manifest_path, wanted_identity = sys.argv[1:]
+          with open(manifest_path, "rb") as stream:
+              manifest = plistlib.load(stream)
+
+          wanted_identity = wanted_identity.casefold()
+          paths = {
+              identity["Manifest"]["RestoreRamDisk"]["Info"]["Path"]
+              for identity in manifest.get("BuildIdentities", [])
+              if wanted_identity in identity.get("Info", {}).get("Variant", "").casefold()
+              and identity.get("Manifest", {}).get("RestoreRamDisk", {}).get("Info", {}).get("Path")
+          }
+          if len(paths) != 1:
+              variants = sorted({
+                  identity.get("Info", {}).get("Variant", "<missing>")
+                  for identity in manifest.get("BuildIdentities", [])
+              })
+              raise SystemExit(
+                  f"expected one RestoreRamDisk for identity {sys.argv[2]!r}; "
+                  f"found {sorted(paths)!r}; available variants: {variants!r}"
+              )
+          print(paths.pop())
+          PY
+          )"
+          test -n "$RAMDISK_PATH"
+          RAMDISK_NAME="$(basename "$RAMDISK_PATH")"
+          RAMDISK_PATTERN="(^|/)${RAMDISK_NAME//./\\.}$"
+
+          # Remote extraction uses ZIP range requests; the complete IPSW is
+          # never downloaded.
+          ipsw extract --no-color \
+            --remote \
+            --pattern "$RAMDISK_PATTERN" \
+            --output work/download \
+            "$URL"
+
+          RAMDISK_IM4P="$(find work/download -type f -name "$RAMDISK_NAME" -print -quit)"
+          test -n "$RAMDISK_IM4P"
+          cp "$RAMDISK_IM4P" work/RestoreRamDisk.pristine.im4p
+          echo "im4p=work/RestoreRamDisk.pristine.im4p" >> "$GITHUB_OUTPUT"
+          shasum -a 256 work/RestoreRamDisk.pristine.im4p \
+            > work/output/RestoreRamDisk.pristine.im4p.sha256
+          ipsw img4 im4p info --json work/RestoreRamDisk.pristine.im4p \
+            > work/output/RestoreRamDisk.im4p.json
+
+      - name: Extract ramdisk payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          ipsw img4 im4p extract \
+            --output work/RestoreRamDisk.dmg \
+            work/RestoreRamDisk.pristine.im4p
+          test -s work/RestoreRamDisk.dmg
+
+      - name: Attach writable filesystem
+        id: attach
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/mnt
+          ATTACH="$(hdiutil attach \
+            -nobrowse \
+            -owners on \
+            -mountpoint "$PWD/work/mnt" \
+            work/RestoreRamDisk.dmg)"
+          DEVICE_NODE="$(printf '%s\n' "$ATTACH" | awk '/^\/dev\// { print $1; exit }')"
+          test -n "$DEVICE_NODE"
+          echo "device=$DEVICE_NODE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate, patch and re-sign ramdisk binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          LDID="$(command -v ldid)"
+          PYTHON="$(command -v python3)"
+          # RestoreRamDisk files retain their root ownership when attached.
+          # Patch as root rather than changing ownership or mode in the image.
+          sudo "$PYTHON" patch_ramdisk_bins.py work/mnt --check
+          sudo "$PYTHON" patch_ramdisk_bins.py work/mnt \
+            --ldid "$LDID" \
+            --records work/output/ramdisk-patches.json
+          sudo "$PYTHON" patch_ramdisk_bins.py work/mnt --verify-patched
+          # ldid creates the intended ad-hoc signatures. Apple's codesign
+          # verifier also evaluates the stock Apple designated requirement,
+          # which an intentionally patched ad-hoc binary cannot satisfy.
+          # Verify identifiers here; patch_ramdisk_bins.py already verifies
+          # that ldid can parse each signature and preserved all entitlements.
+          codesign -d --verbose=4 work/mnt/usr/local/bin/restored_external 2>&1 \
+            | grep -F 'Identifier=com.apple.restored_external'
+          codesign -d --verbose=4 work/mnt/usr/sbin/asr 2>&1 \
+            | grep -F 'Identifier=com.apple.asr'
+          sync
+
+      - name: Detach filesystem
+        if: ${{ always() && steps.attach.outputs.device != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdiutil detach "${{ steps.attach.outputs.device }}"
+
+      - name: Repack patched IM4P
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e work/mnt/usr/sbin/asr
+
+          VERSION="$(jq -r \
+            '[.. | objects | (.version? // .Version?) | select(type == "string")][0] // empty' \
+            work/output/RestoreRamDisk.im4p.json)"
+          VERSION="${VERSION:-RestoreRamDisk}"
+          ipsw img4 im4p create \
+            --type rdsk \
+            --version "$VERSION" \
+            --compress none \
+            --output work/output/RestoreRamDisk.patched.im4p \
+            work/RestoreRamDisk.dmg
+
+          test -s work/output/RestoreRamDisk.patched.im4p
+          shasum -a 256 work/output/RestoreRamDisk.patched.im4p \
+            > work/output/RestoreRamDisk.patched.im4p.sha256
+          ipsw img4 im4p info --json work/output/RestoreRamDisk.patched.im4p \
+            > work/output/RestoreRamDisk.patched.im4p.json
+
+      - name: Verify repacked payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/verify-mnt
+          ipsw img4 im4p extract \
+            --output work/RestoreRamDisk.verify.dmg \
+            work/output/RestoreRamDisk.patched.im4p
+          VERIFY_ATTACH="$(hdiutil attach \
+            -readonly \
+            -nobrowse \
+            -owners on \
+            -mountpoint "$PWD/work/verify-mnt" \
+            work/RestoreRamDisk.verify.dmg)"
+          VERIFY_DEVICE="$(printf '%s\n' "$VERIFY_ATTACH" | awk '/^\/dev\// { print $1; exit }')"
+          trap 'hdiutil detach "$VERIFY_DEVICE" >/dev/null 2>&1 || true' EXIT
+          python3 patch_ramdisk_bins.py work/verify-mnt --verify-patched
+          ldid -e work/verify-mnt/usr/local/bin/restored_external >/dev/null
+          ldid -e work/verify-mnt/usr/sbin/asr >/dev/null
+          hdiutil detach "$VERIFY_DEVICE"
+          trap - EXIT
+
+      - name: Upload patched RestoreRamDisk
+        uses: actions/upload-artifact@v4
+        with:
+          name: RestoreRamDisk-${{ inputs.device }}-${{ inputs.build }}
+          path: work/output/
+          if-no-files-found: error
+          retention-days: 14
