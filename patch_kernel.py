@@ -297,15 +297,22 @@ def resolve(source: Path, groups: set[str]) -> tuple[bytearray, list[dict[str, o
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("kernel", type=Path, help="pristine decompressed XR 22H374 kernelcache")
+    parser.add_argument("kernel", type=Path, nargs="?", help="pristine decompressed XR 22H374 kernelcache")
     parser.add_argument("output", type=Path, nargs="?", default=Path("kernelcache.patched"))
+    parser.add_argument(
+        "--profile",
+        choices=("full", "no-sep-aks", "no-credential-manager", "no-sep-aks-no-acm", "custom"),
+        help=("select a named diagnostic profile; full is the existing all-groups behavior. "
+              "Profiles excluding groups are experiments, not confirmed bootable kernels"),
+    )
     parser.add_argument(
         "--group",
         action="append",
         choices=("amfi", "credential-manager", "debugger", "identity", "panic", "persona", "ppl", "sandbox", "sep-aks", "usb"),
         dest="groups",
-        help="apply only this group (repeatable; default: all strict groups)",
+        help="apply only this group (repeatable; can be combined with --profile custom)",
     )
+    parser.add_argument("--list-profiles", action="store_true", help="print profile contents and exit")
     parser.add_argument("--check", action="store_true", help="validate without writing")
     parser.add_argument(
         "--records",
@@ -314,10 +321,39 @@ def main() -> None:
     )
     arguments = parser.parse_args()
 
+    all_groups = {
+        "amfi", "credential-manager", "debugger", "identity", "panic",
+        "persona", "ppl", "sandbox", "sep-aks", "usb",
+    }
+    profiles = {
+        "full": all_groups,
+        "no-sep-aks": all_groups - {"sep-aks"},
+        "no-credential-manager": all_groups - {"credential-manager"},
+        "no-sep-aks-no-acm": all_groups - {"sep-aks", "credential-manager"},
+    }
+    if arguments.list_profiles:
+        for name, selected in profiles.items():
+            print(f"{name}: {', '.join(sorted(selected))}")
+        print("custom: specify one or more --group values")
+        return
+    if arguments.kernel is None:
+        parser.error("kernel is required unless --list-profiles is used")
+
+    if arguments.profile and arguments.profile != "custom" and arguments.groups:
+        parser.error("use either a named --profile or repeated --group values, not both")
+    if arguments.profile == "custom" and not arguments.groups:
+        parser.error("--profile custom requires at least one --group")
+    if arguments.profile == "custom" or arguments.groups:
+        groups = set(arguments.groups or ())
+        profile_name = "custom"
+    else:
+        profile_name = arguments.profile or "full"
+        groups = set(profiles[profile_name])
+
     if not arguments.kernel.is_file():
         raise SystemExit(f"[!] kernel not found: {arguments.kernel}")
-    groups = set(arguments.groups or ("amfi", "credential-manager", "debugger", "identity", "panic", "persona", "ppl", "sandbox", "sep-aks", "usb"))
     data, records = resolve(arguments.kernel, groups)
+    print(f"[+] profile: {profile_name} ({len(records)} patch records)")
     for group in sorted(groups):
         print(f"[+] {group}: resolved {sum(r['group'] == group for r in records)} guarded records")
 
