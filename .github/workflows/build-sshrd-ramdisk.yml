@@ -205,9 +205,13 @@ jobs:
         if: ${{ always() }}
         shell: bash
         run: |
-          set +e
-          test -z "${{ steps.inject.outputs.device }}" || hdiutil detach "${{ steps.inject.outputs.device }}"
-          test -z "${{ steps.verify.outputs.device }}" || hdiutil detach "${{ steps.verify.outputs.device }}"
+          # Both normal-path steps already detach their images. Cleanup is
+          # best-effort for failed runs and must never turn a successful build
+          # into a failure merely because a device is already gone.
+          test -z "${{ steps.inject.outputs.device }}" || \
+            hdiutil detach "${{ steps.inject.outputs.device }}" >/dev/null 2>&1 || true
+          test -z "${{ steps.verify.outputs.device }}" || \
+            hdiutil detach "${{ steps.verify.outputs.device }}" >/dev/null 2>&1 || true
 
       - name: Upload unsigned SSHRD IM4P
         uses: actions/upload-artifact@v4
