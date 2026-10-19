@@ -1,0 +1,127 @@
+name: Build XR userland hook and patches
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-userland-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install signing tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ldid-procursus
+          command -v ldid
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Authenticate four checked-in stock binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/source work/output
+          python3 prepare_userland_sources.py bins work/source
+          python3 patch_userland_bins.py work/source --check
+          python3 patch_launchd_weakload.py work/source/launchd
+
+      - name: Patch and sign three XR daemons
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 patch_userland_bins.py work/source work/output/daemons \
+            --ldid "$(command -v ldid)"
+          python3 - <<'PY'
+          import plistlib
+          import subprocess
+          from pathlib import Path
+
+          for name in ('coreauthd', 'mobileactivationd', 'ctkd'):
+              before = subprocess.check_output(['ldid', '-e', f'work/source/{name}'])
+              after = subprocess.check_output(['ldid', '-e', f'work/output/daemons/{name}'])
+              if plistlib.loads(before) != plistlib.loads(after):
+                  raise SystemExit(f'{name}: entitlements changed')
+              print(f'[+] {name}: ad-hoc signature and entitlements verified')
+          PY
+          python3 verify_userland_signature.py work/output/daemons/{coreauthd,mobileactivationd,ctkd}
+
+      - name: Patch launchd weak dependency and repair stock code slots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 patch_launchd_weakload.py work/source/launchd \
+            --apply -o work/output/launchd
+          python3 userland/liter8/resign_pagehashes.py work/output/launchd --apply
+          python3 verify_userland_signature.py work/output/launchd
+          otool -L work/output/launchd | grep -F '/usr/lib/lhook'
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, '.')
+          import patch_launchd_weakload as p
+          src = Path('work/source/launchd').read_bytes()
+          out = Path('work/output/launchd').read_bytes()
+          cmds, end = p.commands(out)
+          assert len(out) == len(src)
+          assert end == 0xc80
+          assert p.first_text_section(out, cmds) == 0xc88
+          assert sum(c == p.LC_LOAD_WEAK_DYLIB and p.HOOK in blob for c, blob in cmds) == 1
+          # Only the header/load commands and the stock CodeDirectory's page
+          # hashes may differ. The rehash script leaves the rest of the
+          # signature's special slots intact; the verifier checked code slots.
+          print('[+] launchd structure and code slots verified')
+          PY
+
+      - name: Build and sign Liter8-compatible hook payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh userland/liter8/build.sh
+          mkdir -p work/output/hook
+          cp userland/liter8/lhook.dylib userland/liter8/systemhook.dylib \
+            userland/liter8/sbextissue userland/liter8/lhook.deny \
+            work/output/hook/
+          python3 verify_userland_signature.py \
+            work/output/hook/lhook.dylib \
+            work/output/hook/systemhook.dylib \
+            work/output/hook/sbextissue
+
+      - name: Write artifact manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > work/output/README.txt <<'EOF'
+          XRa1n / iPhone11,8 / iOS 18.7.10 (22H374) userland build
+
+          daemons/: three guarded patched, entitlement-preserving ad-hoc signed daemons.
+          launchd: guarded weak /usr/lib/lhook dependency; stock CodeDirectory
+                   code-slot hashes repaired without replacing special slots.
+          hook/: Liter8-derived universal arm64+arm64e signed hook payloads.
+
+          This is a build artifact, not a deployment script. The unmodified
+          launchd service cache and its detached signature are not bundled.
+          A separate XR cache edit and device-side installation validation
+          are still required. Do not enable /var/jb/.lhook_enabled on first boot.
+          EOF
+          (cd work/output && find . -type f ! -name SHA256SUMS -print0 \
+            | sort -z | xargs -0 shasum -a 256) > work/output/SHA256SUMS
+          cat work/output/SHA256SUMS
+
+      - name: Upload verified build
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr-22H374-userland
+          path: work/output/
+          if-no-files-found: error
+          retention-days: 7
