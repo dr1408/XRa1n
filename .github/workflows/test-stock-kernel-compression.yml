@@ -1,0 +1,218 @@
+name: Test Stock Kernel Compression
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Apple product type
+        required: true
+        default: iPhone11,8
+      build:
+        description: iOS build
+        required: true
+        default: 22H374
+      board:
+        description: Hardware DeviceClass from BuildManifest
+        required: true
+        default: n841ap
+      identity:
+        description: Build identity variant containing the kernelcache
+        required: true
+        default: Erase
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stock-kernel-compression-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}
+  cancel-in-progress: true
+
+jobs:
+  repack:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVICE: ${{ inputs.device }}
+      BUILD: ${{ inputs.build }}
+      BOARD: ${{ inputs.board }}
+      IDENTITY: ${{ inputs.identity }}
+      # Pin the exact Liter8 implementation whose FirmwareArtifact policy uses
+      # Apple's iBoot-restricted Compression algorithm 0x891.
+      LITER8_REPOSITORY: https://github.com/gru2007/Liter8-iPad8.git
+      LITER8_COMMIT: fae5c3362973e5a4fcfe1ace841bf32f7e559d2d
+
+    steps:
+      - name: Checkout XRa1n
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install ipsw
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install blacktop/tap/ipsw
+          ipsw version
+          swift --version
+
+      - name: Resolve firmware URL
+        id: firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/download work/output
+          URL="$(ipsw download appledb --no-color \
+            --os iOS \
+            --device "$DEVICE" \
+            --build "$BUILD" \
+            --urls \
+            | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^https:\/\//) { print $i; exit } }')"
+          test -n "$URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$URL" > work/output/firmware-url.txt
+          ipsw info --remote "$URL" > work/output/firmware-info.txt
+
+      - name: Download only the stock kernelcache
+        id: kernel
+        shell: bash
+        env:
+          URL: ${{ steps.firmware.outputs.url }}
+        run: |
+          set -euo pipefail
+          # Resolve the exact archive member from BuildManifest. `ipsw extract
+          # --kernel` may decode the kernel for analysis, whereas Liter8 needs
+          # the pristine Apple IM4P as its metadata and PAYP template.
+          ipsw extract --no-color \
+            --remote \
+            --pattern '(^|/)BuildManifest\.plist$' \
+            --output work/manifest \
+            "$URL"
+
+          MANIFEST="$(find work/manifest -type f -name BuildManifest.plist -print -quit)"
+          test -n "$MANIFEST"
+          KERNEL_PATH="$(python3 - "$MANIFEST" "$BOARD" "$IDENTITY" <<'PY'
+          import plistlib
+          import sys
+
+          manifest_path, wanted_board, wanted_identity = sys.argv[1:]
+          with open(manifest_path, "rb") as stream:
+              manifest = plistlib.load(stream)
+
+          wanted_board = wanted_board.casefold()
+          wanted_identity = wanted_identity.casefold()
+          matches = []
+          for identity in manifest.get("BuildIdentities", []):
+              info = identity.get("Info", {})
+              if info.get("DeviceClass", "").casefold() != wanted_board:
+                  continue
+              if wanted_identity not in info.get("Variant", "").casefold():
+                  continue
+              path = identity.get("Manifest", {}).get("KernelCache", {}).get("Info", {}).get("Path")
+              if path:
+                  matches.append(path)
+
+          paths = sorted(set(matches))
+          if len(paths) != 1:
+              raise SystemExit(
+                  f"expected one KernelCache for board={sys.argv[2]!r}, "
+                  f"identity={sys.argv[3]!r}; found {paths!r}"
+              )
+          print(paths[0])
+          PY
+          )"
+          test -n "$KERNEL_PATH"
+          KERNEL_NAME="$(basename "$KERNEL_PATH")"
+          KERNEL_PATTERN="(^|/)${KERNEL_NAME//./\\.}$"
+
+          # --remote uses ZIP range requests. It does not download the full IPSW.
+          ipsw extract --no-color \
+            --remote \
+            --pattern "$KERNEL_PATTERN" \
+            --output work/download \
+            "$URL"
+
+          KERNEL="$(find work/download -type f -name "$KERNEL_NAME" -print -quit)"
+          test -n "$KERNEL"
+          cp "$KERNEL" work/output/kernelcache.pristine.im4p
+          test -s work/output/kernelcache.pristine.im4p
+
+          # A shipped IM4P is a DER SEQUENCE and must be preserved as the
+          # metadata/template input to Liter8, not treated as a raw Mach-O.
+          FIRST_BYTE="$(od -An -tx1 -N1 work/output/kernelcache.pristine.im4p | tr -d '[:space:]')"
+          test "$FIRST_BYTE" = 30
+          ipsw img4 im4p info --json work/output/kernelcache.pristine.im4p \
+            > work/output/kernelcache.pristine.im4p.json
+          shasum -a 256 work/output/kernelcache.pristine.im4p \
+            > work/output/kernelcache.pristine.im4p.sha256
+
+      - name: Build pinned Liter8 compressor
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$LITER8_REPOSITORY" work/Liter8
+          git -C work/Liter8 checkout --detach "$LITER8_COMMIT"
+          git -C work/Liter8 submodule update --init --recursive vendor/libimg4-spm
+          swift build \
+            --package-path work/Liter8 \
+            --configuration release \
+            --product liter8
+          LITER8_BIN="$(swift build \
+            --package-path work/Liter8 \
+            --configuration release \
+            --show-bin-path)/liter8"
+          test -x "$LITER8_BIN"
+          printf '%s\n' "$LITER8_BIN" > work/liter8-bin-path
+          git -C work/Liter8 rev-parse HEAD > work/output/liter8-commit.txt
+
+      - name: Recompress untouched stock kernel with Apple algorithm 0x891
+        shell: bash
+        run: |
+          set -euo pipefail
+          LITER8_BIN="$(cat work/liter8-bin-path)"
+
+          "$LITER8_BIN" im4p extract \
+            work/output/kernelcache.pristine.im4p \
+            work/kernelcache.stock.raw \
+            | tee work/output/liter8-extract.log
+
+          # Repack the exact unmodified payload. This isolates the compressor
+          # and IM4P/PAYP reconstruction from every XRa1n kernel patch.
+          "$LITER8_BIN" im4p repack \
+            work/output/kernelcache.pristine.im4p \
+            work/kernelcache.stock.raw \
+            work/output/kernelcache.stock-0x891.im4p \
+            | tee work/output/liter8-repack.log
+
+          "$LITER8_BIN" im4p extract \
+            work/output/kernelcache.stock-0x891.im4p \
+            work/kernelcache.stock-0x891.raw \
+            | tee work/output/liter8-verify-extract.log
+
+          cmp work/kernelcache.stock.raw work/kernelcache.stock-0x891.raw
+          shasum -a 256 work/kernelcache.stock.raw \
+            > work/output/kernelcache.stock.raw.sha256
+          shasum -a 256 work/output/kernelcache.stock-0x891.im4p \
+            > work/output/kernelcache.stock-0x891.im4p.sha256
+          ipsw img4 im4p info --json work/output/kernelcache.stock-0x891.im4p \
+            > work/output/kernelcache.stock-0x891.im4p.json
+
+          {
+            echo "device=$DEVICE"
+            echo "build=$BUILD"
+            echo "liter8_commit=$LITER8_COMMIT"
+            echo "raw_round_trip=PASS"
+            echo "raw_bytes=$(stat -f %z work/kernelcache.stock.raw)"
+            echo "pristine_im4p_sha256=$(shasum -a 256 work/output/kernelcache.pristine.im4p | awk '{print $1}')"
+            echo "repacked_im4p_sha256=$(shasum -a 256 work/output/kernelcache.stock-0x891.im4p | awk '{print $1}')"
+            echo "raw_sha256=$(shasum -a 256 work/kernelcache.stock.raw | awk '{print $1}')"
+          } | tee work/output/result.txt
+
+      - name: Upload stock compression test
+        uses: actions/upload-artifact@v4
+        with:
+          name: StockKernel-0x891-${{ inputs.device }}-${{ inputs.build }}
+          path: work/output/
+          if-no-files-found: error
+          retention-days: 14
