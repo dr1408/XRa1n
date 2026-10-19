@@ -1,0 +1,219 @@
+name: Build SSH Restore Ramdisk
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Apple product type
+        required: true
+        default: iPhone11,8
+      build:
+        description: iOS build
+        required: true
+        default: 22H374
+      identity:
+        description: Restore identity containing RestoreRamDisk
+        required: true
+        default: Erase
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-sshrd-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVICE: ${{ inputs.device }}
+      BUILD: ${{ inputs.build }}
+      IDENTITY: ${{ inputs.identity }}
+      SSH_PAYLOAD_SHA256: ddfa230acd2789c7e61ddb0d2ec3df9a6c741f2ddcab58fc1a826d278be1d74d
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install firmware tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install blacktop/tap/ipsw
+          brew install ldid-procursus
+          ipsw version
+          command -v ldid
+
+      - name: Validate reviewed SSH payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s payloads/ssh.tar.gz
+          test -s payloads/sftp_server_ents.plist
+          printf '%s  %s\n' "$SSH_PAYLOAD_SHA256" payloads/ssh.tar.gz | shasum -a 256 -c -
+          gtar --version >/dev/null 2>&1 || brew install gnu-tar
+
+      - name: Resolve firmware URL and RestoreRamDisk path
+        id: firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/download work/manifest work/output
+          URL="$(ipsw download appledb --no-color --os iOS --device "$DEVICE" \
+            --build "$BUILD" --urls | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^https:\/\//) { print $i; exit } }')"
+          test -n "$URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+          ipsw extract --no-color --remote \
+            --pattern '(^|/)BuildManifest\.plist$' \
+            --output work/manifest "$URL"
+          MANIFEST="$(find work/manifest -type f -name BuildManifest.plist -print -quit)"
+          test -n "$MANIFEST"
+          RAMDISK_PATH="$(python3 - "$MANIFEST" "$IDENTITY" <<'PY'
+          import plistlib, sys
+          manifest_path, identity_name = sys.argv[1:]
+          with open(manifest_path, "rb") as stream:
+              manifest = plistlib.load(stream)
+          wanted = identity_name.casefold()
+          paths = {
+              item["Manifest"]["RestoreRamDisk"]["Info"]["Path"]
+              for item in manifest.get("BuildIdentities", [])
+              if wanted in item.get("Info", {}).get("Variant", "").casefold()
+              and item.get("Manifest", {}).get("RestoreRamDisk", {}).get("Info", {}).get("Path")
+          }
+          if len(paths) != 1:
+              raise SystemExit(f"expected one RestoreRamDisk, found {sorted(paths)!r}")
+          print(paths.pop())
+          PY
+          )"
+          echo "ramdisk_path=$RAMDISK_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract stock RestoreRamDisk
+        shell: bash
+        env:
+          URL: ${{ steps.firmware.outputs.url }}
+          RAMDISK_PATH: ${{ steps.firmware.outputs.ramdisk_path }}
+        run: |
+          set -euo pipefail
+          NAME="$(basename "$RAMDISK_PATH")"
+          PATTERN="(^|/)${NAME//./\\.}$"
+          ipsw extract --no-color --remote --pattern "$PATTERN" --output work/download "$URL"
+          SOURCE="$(find work/download -type f -name "$NAME" -print -quit)"
+          test -n "$SOURCE"
+          cp "$SOURCE" work/RestoreRamDisk.stock.im4p
+          ipsw img4 im4p info --json work/RestoreRamDisk.stock.im4p > work/output/stock-im4p.json
+          ipsw img4 im4p extract --output work/RestoreRamDisk.stock.dmg work/RestoreRamDisk.stock.im4p
+          test -s work/RestoreRamDisk.stock.dmg
+
+      - name: Create expanded APFS SSHRD and inject payload
+        id: inject
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/stock-mnt work/sshrd-mnt
+          STOCK_ATTACH="$(hdiutil attach -readonly -nobrowse -owners off \
+            -mountpoint "$PWD/work/stock-mnt" work/RestoreRamDisk.stock.dmg)"
+          STOCK_DEV="$(printf '%s\n' "$STOCK_ATTACH" | awk '/^\/dev\// { print $1; exit }')"
+          test -n "$STOCK_DEV"
+          trap 'hdiutil detach "$STOCK_DEV" >/dev/null 2>&1 || true' EXIT
+
+          # Match Liter8: recreate, rather than resize, Apple's image.
+          sudo hdiutil create -size 254m \
+            -imagekey diskimage-class=CRawDiskImage \
+            -format UDRW -fs APFS -layout NONE \
+            -srcfolder "$PWD/work/stock-mnt" -copyuid root \
+            work/RestoreRamDisk.sshrd.dmg
+          hdiutil detach "$STOCK_DEV"
+          trap - EXIT
+
+          # hdiutil create ran through sudo so the image is root-owned. Match
+          # Liter8 and hand it back to the workflow user before writable attach;
+          # otherwise macOS may attach this APFS image read-only.
+          sudo chown "$(id -u):$(id -g)" work/RestoreRamDisk.sshrd.dmg
+
+          SSH_ATTACH="$(hdiutil attach -nobrowse -owners off \
+            -mountpoint "$PWD/work/sshrd-mnt" work/RestoreRamDisk.sshrd.dmg)"
+          SSH_DEV="$(printf '%s\n' "$SSH_ATTACH" | awk '/^\/dev\// { print $1; exit }')"
+          test -n "$SSH_DEV"
+          echo "device=$SSH_DEV" >> "$GITHUB_OUTPUT"
+
+          # Fail with a direct mount diagnosis instead of thousands of tar
+          # errors if the image was not attached writable.
+          touch work/sshrd-mnt/.xra1n-write-test
+          rm work/sshrd-mnt/.xra1n-write-test
+
+          sudo gtar -x --no-overwrite-dir -f payloads/ssh.tar.gz -C work/sshrd-mnt
+          for path in \
+            usr/bin/img4tool usr/bin/img4 \
+            usr/sbin/dietappleh13camerad usr/sbin/dietappleh16camerad \
+            usr/local/bin/wget usr/local/bin/procexp; do
+            sudo rm -f "work/sshrd-mnt/$path"
+          done
+          sudo ldid -Spayloads/sftp_server_ents.plist -M -Cadhoc \
+            work/sshrd-mnt/usr/libexec/sftp-server
+          test -x work/sshrd-mnt/usr/local/bin/dropbear
+          test -x work/sshrd-mnt/usr/local/bin/restored_external
+          test -x work/sshrd-mnt/usr/libexec/sftp-server
+          ldid -e work/sshrd-mnt/usr/libexec/sftp-server > work/output/sftp-server-entitlements.plist
+          sync
+
+      - name: Detach and shrink SSHRD
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdiutil detach "${{ steps.inject.outputs.device }}"
+          hdiutil resize -sectors min work/RestoreRamDisk.sshrd.dmg
+
+      - name: Repack SSHRD IM4P
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '[.. | objects | (.version? // .Version?) | select(type == "string")][0] // empty' work/output/stock-im4p.json)"
+          VERSION="${VERSION:-RestoreRamDisk}"
+          ipsw img4 im4p create --type rdsk --version "$VERSION" --compress none \
+            --output work/output/RestoreRamDisk.sshrd.im4p work/RestoreRamDisk.sshrd.dmg
+          test -s work/output/RestoreRamDisk.sshrd.im4p
+          shasum -a 256 work/output/RestoreRamDisk.sshrd.im4p > work/output/RestoreRamDisk.sshrd.im4p.sha256
+          ipsw img4 im4p info --json work/output/RestoreRamDisk.sshrd.im4p > work/output/sshrd-im4p.json
+
+      - name: Verify repacked SSHRD filesystem
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/verify-mnt
+          ipsw img4 im4p extract --output work/RestoreRamDisk.verify.dmg \
+            work/output/RestoreRamDisk.sshrd.im4p
+          ATTACH="$(hdiutil attach -readonly -nobrowse -owners off \
+            -mountpoint "$PWD/work/verify-mnt" work/RestoreRamDisk.verify.dmg)"
+          DEV="$(printf '%s\n' "$ATTACH" | awk '/^\/dev\// { print $1; exit }')"
+          test -n "$DEV"
+          echo "device=$DEV" >> "$GITHUB_OUTPUT"
+          test -x work/verify-mnt/usr/local/bin/dropbear
+          test -x work/verify-mnt/usr/local/bin/restored_external
+          test -x work/verify-mnt/usr/libexec/sftp-server
+          ldid -e work/verify-mnt/usr/libexec/sftp-server >/dev/null
+          hdiutil detach "$DEV"
+
+      - name: Cleanup mounted images
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          test -z "${{ steps.inject.outputs.device }}" || hdiutil detach "${{ steps.inject.outputs.device }}"
+          test -z "${{ steps.verify.outputs.device }}" || hdiutil detach "${{ steps.verify.outputs.device }}"
+
+      - name: Upload unsigned SSHRD IM4P
+        uses: actions/upload-artifact@v4
+        with:
+          name: SSHRestoreRamDisk-${{ inputs.device }}-${{ inputs.build }}
+          path: work/output/
+          if-no-files-found: error
+          retention-days: 14
+
