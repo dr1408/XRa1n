@@ -1,4 +1,4 @@
-name: Test Stock Kernel Compression
+name: Build Patched Kernel
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: stock-kernel-compression-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}
+  group: patched-kernel-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}
   cancel-in-progress: true
 
 jobs:
@@ -166,7 +166,7 @@ jobs:
           printf '%s\n' "$LITER8_BIN" > work/liter8-bin-path
           git -C work/Liter8 rev-parse HEAD > work/output/liter8-commit.txt
 
-      - name: Recompress untouched stock kernel with Apple algorithm 0x891
+      - name: Patch kernel and recompress with Apple algorithm 0x891
         shell: bash
         run: |
           set -euo pipefail
@@ -177,42 +177,59 @@ jobs:
             work/kernelcache.stock.raw \
             | tee work/output/liter8-extract.log
 
-          # Repack the exact unmodified payload. This isolates the compressor
-          # and IM4P/PAYP reconstruction from every XRa1n kernel patch.
+          # The patcher is hash-locked to the exact decompressed XR 22H374
+          # kernel and guards every original instruction before writing.
+          python3 patch_kernel.py \
+            work/kernelcache.stock.raw \
+            work/kernelcache.patched.raw \
+            --check \
+            | tee work/output/kernel-patch-check.log
+          python3 patch_kernel.py \
+            work/kernelcache.stock.raw \
+            work/kernelcache.patched.raw \
+            --records work/output/kernel-patches.json \
+            | tee work/output/kernel-patch.log
+
+          # FirmwareArtifact preserves the original IM4P metadata and PAYP,
+          # and uses Apple's iBoot-restricted Compression algorithm 0x891.
           "$LITER8_BIN" im4p repack \
             work/output/kernelcache.pristine.im4p \
-            work/kernelcache.stock.raw \
-            work/output/kernelcache.stock-0x891.im4p \
+            work/kernelcache.patched.raw \
+            work/output/kernelcache.patched-0x891.im4p \
             | tee work/output/liter8-repack.log
 
           "$LITER8_BIN" im4p extract \
-            work/output/kernelcache.stock-0x891.im4p \
-            work/kernelcache.stock-0x891.raw \
+            work/output/kernelcache.patched-0x891.im4p \
+            work/kernelcache.patched-0x891.verify.raw \
             | tee work/output/liter8-verify-extract.log
 
-          cmp work/kernelcache.stock.raw work/kernelcache.stock-0x891.raw
+          cmp work/kernelcache.patched.raw work/kernelcache.patched-0x891.verify.raw
           shasum -a 256 work/kernelcache.stock.raw \
             > work/output/kernelcache.stock.raw.sha256
-          shasum -a 256 work/output/kernelcache.stock-0x891.im4p \
-            > work/output/kernelcache.stock-0x891.im4p.sha256
-          ipsw img4 im4p info --json work/output/kernelcache.stock-0x891.im4p \
-            > work/output/kernelcache.stock-0x891.im4p.json
+          shasum -a 256 work/kernelcache.patched.raw \
+            > work/output/kernelcache.patched.raw.sha256
+          shasum -a 256 work/output/kernelcache.patched-0x891.im4p \
+            > work/output/kernelcache.patched-0x891.im4p.sha256
+          ipsw img4 im4p info --json work/output/kernelcache.patched-0x891.im4p \
+            > work/output/kernelcache.patched-0x891.im4p.json
 
           {
             echo "device=$DEVICE"
             echo "build=$BUILD"
             echo "liter8_commit=$LITER8_COMMIT"
-            echo "raw_round_trip=PASS"
-            echo "raw_bytes=$(stat -f %z work/kernelcache.stock.raw)"
+            echo "patched_raw_round_trip=PASS"
+            echo "patch_records=$(python3 -c 'import json; print(len(json.load(open("work/output/kernel-patches.json"))))')"
+            echo "raw_bytes=$(stat -f %z work/kernelcache.patched.raw)"
             echo "pristine_im4p_sha256=$(shasum -a 256 work/output/kernelcache.pristine.im4p | awk '{print $1}')"
-            echo "repacked_im4p_sha256=$(shasum -a 256 work/output/kernelcache.stock-0x891.im4p | awk '{print $1}')"
-            echo "raw_sha256=$(shasum -a 256 work/kernelcache.stock.raw | awk '{print $1}')"
+            echo "stock_raw_sha256=$(shasum -a 256 work/kernelcache.stock.raw | awk '{print $1}')"
+            echo "patched_raw_sha256=$(shasum -a 256 work/kernelcache.patched.raw | awk '{print $1}')"
+            echo "patched_im4p_sha256=$(shasum -a 256 work/output/kernelcache.patched-0x891.im4p | awk '{print $1}')"
           } | tee work/output/result.txt
 
-      - name: Upload stock compression test
+      - name: Upload patched kernel
         uses: actions/upload-artifact@v4
         with:
-          name: StockKernel-0x891-${{ inputs.device }}-${{ inputs.build }}
+          name: PatchedKernel-0x891-${{ inputs.device }}-${{ inputs.build }}
           path: work/output/
           if-no-files-found: error
           retention-days: 14
