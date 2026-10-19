@@ -27,7 +27,7 @@ jobs:
           command -v ldid
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Authenticate four checked-in stock binaries
+      - name: Authenticate checked-in daemon and launchd binaries
         shell: bash
         run: |
           set -euo pipefail
@@ -55,6 +55,68 @@ jobs:
               print(f'[+] {name}: ad-hoc signature and entitlements verified')
           PY
           python3 verify_userland_signature.py work/output/daemons/{coreauthd,mobileactivationd,ctkd}
+
+      - name: Patch and sign XR Setup executable like Liter8
+        shell: bash
+        run: |
+          set -euo pipefail
+          setup_src=bins/Setup.app/Setup
+          mkdir -p work/setup work/output/setup
+          printf '%s  %s\n' \
+            '595a9e839dcdba3dbaa93f74e63627f984ab56537ce6687a1a1c9a633338344d' \
+            "$setup_src" | shasum -a 256 -c -
+          setup_identifier=$(codesign -d --verbose=4 "$setup_src" 2>&1 \
+            | sed -n 's/^Identifier=//p' | head -1)
+          test "$setup_identifier" = com.apple.purplebuddy
+          ldid -e "$setup_src" > work/setup/Setup.entitlements.plist
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+          info = plistlib.loads(Path('bins/Setup.app/Info.plist').read_bytes())
+          assert info['CFBundleIdentifier'] == 'com.apple.purplebuddy'
+          assert info['CFBundleExecutable'] == 'Setup'
+          assert plistlib.loads(Path('work/setup/Setup.entitlements.plist').read_bytes())
+          PY
+          python3 patch_setup_xr.py "$setup_src" --expect-count 58 \
+            --records work/setup/Setup.dryrun.records.json > work/setup/Setup.dryrun.log
+          cp "$setup_src" work/setup/Setup.unsigned
+          python3 patch_setup_xr.py work/setup/Setup.unsigned --apply \
+            --expect-count 58 --records work/output/setup/Setup.records.json
+          python3 patch_setup_xr.py work/setup/Setup.unsigned --verify --expect-count 58
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          original = Path('bins/Setup.app/Setup').read_bytes()
+          patched = Path('work/setup/Setup.unsigned').read_bytes()
+          records = json.loads(Path('work/output/setup/Setup.records.json').read_text())
+          assert len(records) == 58 and len({r['offset'] for r in records}) == 58
+          expected = bytearray(original)
+          for record in records:
+              offset = record['offset']
+              assert expected[offset:offset + 8].hex() == record['originalBytes']
+              expected[offset:offset + 8] = bytes.fromhex(record['replacementBytes'])
+          assert bytes(expected) == patched, 'unexpected bytes changed in Setup'
+          assert Path('work/setup/Setup.unsigned.bak').read_bytes() == original
+          print('[+] Setup: exactly 58 guarded instruction sites changed')
+          PY
+          cp work/setup/Setup.unsigned work/output/setup/Setup
+          ldid -I"$setup_identifier" -Swork/setup/Setup.entitlements.plist \
+            -Cadhoc work/output/setup/Setup
+          codesign -v work/output/setup/Setup
+          python3 verify_userland_signature.py work/output/setup/Setup
+          python3 patch_setup_xr.py work/output/setup/Setup --verify --expect-count 58
+          python3 - <<'PY'
+          import plistlib
+          import subprocess
+          from pathlib import Path
+          original = plistlib.loads(subprocess.check_output(['ldid', '-e', 'bins/Setup.app/Setup']))
+          signed = plistlib.loads(subprocess.check_output(['ldid', '-e', 'work/output/setup/Setup']))
+          assert original == signed, 'Setup entitlements changed'
+          detail = subprocess.run(['codesign', '-d', '--verbose=4', 'work/output/setup/Setup'],
+                                  capture_output=True, text=True, check=True)
+          assert 'Identifier=com.apple.purplebuddy' in detail.stderr
+          print('[+] Setup: original identifier and complete entitlements preserved')
+          PY
 
       - name: Patch launchd weak dependency and repair stock code slots
         shell: bash
@@ -108,6 +170,10 @@ jobs:
           launchd: guarded weak /usr/lib/lhook dependency; stock CodeDirectory
                    code-slot hashes repaired without replacing special slots.
           hook/: Liter8-derived universal arm64+arm64e signed hook payloads.
+          setup/Setup: XR 22H374 Setup executable, 58 class-owned methods
+                       patched and ad-hoc signed with Liter8's original
+                       identifier/entitlement-preserving ldid sequence.
+          setup/Setup.records.json: guarded XR patch-site evidence.
 
           This is a build artifact, not a deployment script. The unmodified
           launchd service cache and its detached signature are not bundled.
