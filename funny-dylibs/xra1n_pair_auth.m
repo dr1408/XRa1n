@@ -17,21 +17,47 @@
 #import <objc/runtime.h>
 
 #include <stdbool.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <syslog.h>
+#include <unistd.h>
 
 enum { kLocationBasedTrustComputerPolicy = 1028 };
 
 static const char *kPairingFallbackMarker =
     "/private/var/root/Library/Lockdown/.xra1n-pairing-fallback";
+static const char *kPairingDiagnosticLog =
+    "/private/var/root/Library/Lockdown/xra1n-pair-auth.log";
 
 typedef void (^L8PolicyReply)(id result, NSError *error);
 typedef void (*EvaluatePolicyIMP)(id, SEL, NSInteger, NSDictionary *,
                                   L8PolicyReply);
 
 static EvaluatePolicyIMP gOriginalEvaluatePolicy;
+
+static void append_diagnostic(NSInteger policy, id result, NSError *error,
+                              const char *event)
+{
+    int descriptor = open(kPairingDiagnosticLog,
+                          O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW,
+                          S_IRUSR | S_IWUSR);
+    if (descriptor < 0) {
+        return;
+    }
+    (void)fchmod(descriptor, S_IRUSR | S_IWUSR);
+    NSString *description = error != nil ? error.description : @"<nil>";
+    const char *domain = error != nil ? error.domain.UTF8String : "<nil>";
+    const char *detail = description.UTF8String;
+    dprintf(descriptor,
+            "event=%s pid=%d policy=%ld result=%s domain=%s code=%ld error=%s\n",
+            event, getpid(), (long)policy, result != nil ? "yes" : "no",
+            domain != NULL ? domain : "<null>",
+            error != nil ? (long)error.code : 0,
+            detail != NULL ? detail : "<null>");
+    close(descriptor);
+}
 
 static bool pairing_fallback_enabled(void)
 {
@@ -61,18 +87,32 @@ static bool is_expected_sep_less_failure(NSError *error)
 static void l8_evaluatePolicy(id self, SEL command, NSInteger policy,
                               NSDictionary *options, L8PolicyReply reply)
 {
-    if (policy != kLocationBasedTrustComputerPolicy || reply == nil ||
-        !pairing_fallback_enabled()) {
+    if (reply == nil || !pairing_fallback_enabled()) {
         gOriginalEvaluatePolicy(self, command, policy, options, reply);
         return;
     }
 
     gOriginalEvaluatePolicy(
         self, command, policy, options, ^(id result, NSError *error) {
-            if (result == nil && is_expected_sep_less_failure(error)) {
+            append_diagnostic(policy, result, error, "reply");
+            if (policy == kLocationBasedTrustComputerPolicy && result == nil &&
+                is_expected_sep_less_failure(error)) {
                 syslog(LOG_NOTICE,
                        "xra1n-pair: accepted explicit Trust after expected "
                        "policy 1028 LAError -1000");
+                reply(@{}, nil);
+                return;
+            }
+            /* Diagnostic XR build: explicit Trust is the only lockdownd flow
+             * under test. Accept another failed private LA policy once, while
+             * recording its exact policy and NSError for the final narrow
+             * selector. Successful evaluations are never modified. */
+            if (result == nil && error != nil) {
+                append_diagnostic(policy, result, error,
+                                  "temporary-trust-fallback");
+                syslog(LOG_NOTICE,
+                       "xra1n-pair: temporary XR Trust fallback policy %ld",
+                       (long)policy);
                 reply(@{}, nil);
                 return;
             }
@@ -108,4 +148,5 @@ static void install_trust_computer_policy_guard(void)
     }
     syslog(LOG_NOTICE,
            "xra1n-pair: installed marker-gated Trust-computer policy guard");
+    append_diagnostic(-1, @{}, nil, "constructor-installed");
 }
