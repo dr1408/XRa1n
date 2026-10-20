@@ -168,26 +168,13 @@ PATCHES: tuple[Patch, ...] = (
     Patch("kernel.apfs.is-valid-class.result", "apfs", 0x02EE5E98, 0xD503237F, 0x52800020, "Force apfs_is_valid_class to return true"),
     Patch("kernel.apfs.is-valid-class.return", "apfs", 0x02EE5E9C, 0xD10183FF, RET, "Early return from apfs_is_valid_class"),
 
-    # AKS start, selector-7 case-local shim, and operation-log silencer.
+    # AKS start, broad USBLiter8-style externalMethod success override, and
+    # operation-log silencer.  This intentionally affects every AKS selector:
+    # AppleKeyStoreUserClient::externalMethod returns kIOReturnSuccess before
+    # validating arguments or entering the selector dispatcher.
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
-    Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
-    Patch("kernel.aks.selector7.02", "sep-aks", 0x0223E7FC, 0xB900B3FF, 0xF9401288, "Load scalarInput"),
-    Patch("kernel.aks.selector7.03", "sep-aks", 0x0223E800, 0xB90133FF, 0xB40001A8, "Validate scalarInput"),
-    Patch("kernel.aks.selector7.04", "sep-aks", 0x0223E804, 0x6F00E400, 0xB9402A88, "Load scalarInputCount"),
-    Patch("kernel.aks.selector7.05", "sep-aks", 0x0223E808, 0xAD0883E0, 0x7100051F, "Require one scalar input"),
-    Patch("kernel.aks.selector7.06", "sep-aks", 0x0223E80C, 0xAD0783E0, 0x54000141, "Reject invalid scalar input count"),
-    Patch("kernel.aks.selector7.07", "sep-aks", 0x0223E810, 0x3D803BE0, 0xF9402689, "Load scalarOutput"),
-    Patch("kernel.aks.selector7.08", "sep-aks", 0x0223E814, 0xB9402A88, 0xB4000109, "Validate scalarOutput"),
-    Patch("kernel.aks.selector7.09", "sep-aks", 0x0223E818, 0x7100051F, 0xB9405288, "Load scalarOutputCount"),
-    Patch("kernel.aks.selector7.10", "sep-aks", 0x0223E81C, 0x54030181, 0x7100051F, "Require one scalar output"),
-    Patch("kernel.aks.selector7.11", "sep-aks", 0x0223E820, 0xB9405288, 0x540000A1, "Reject invalid scalar output count"),
-    Patch("kernel.aks.selector7.12", "sep-aks", 0x0223E824, 0x7100051F, 0xD28000C8, "Synthesize noPin | beenUnlocked state"),
-    Patch("kernel.aks.selector7.13", "sep-aks", 0x0223E828, 0x54030121, 0xF9000128, "Store synthesized AKS state"),
-    Patch("kernel.aks.selector7.14", "sep-aks", 0x0223E82C, 0x12800008, 0x52800013, "Set selector-7 success result"),
-    Patch("kernel.aks.selector7.15", "sep-aks", 0x0223E830, 0xB900BFE8, 0x14001807, "Branch to authenticated success epilogue"),
-    Patch("kernel.aks.selector7.16", "sep-aks", 0x0223E834, 0xF9401288, 0x52805853, "Build kIOReturnBadArgument low half"),
-    Patch("kernel.aks.selector7.17", "sep-aks", 0x0223E838, 0xB9400102, 0x72BC0013, "Build kIOReturnBadArgument high half"),
-    Patch("kernel.aks.selector7.18", "sep-aks", 0x0223E83C, 0x9102F3E3, 0x14001804, "Branch bad arguments to authenticated epilogue"),
+    Patch("kernel.aks.external-method-success", "sep-aks", 0x02245F64, 0xD503237F, MOV_X0_ZERO, "Force every AKS externalMethod selector to return success"),
+    Patch("kernel.aks.external-method-return", "sep-aks", 0x02245F68, 0xD10643FF, RET, "Return immediately from the forced AKS externalMethod success path"),
     Patch("kernel.aks.external-method-log", "sep-aks", 0x022461AC, 0x97C93C9A, NOP, "Silence replaced AKS externalMethod operation log"),
 
     # AMFI and policy helpers (12 records).
@@ -251,7 +238,7 @@ def resolve(source: Path, groups: set[str]) -> tuple[bytearray, list[dict[str, o
         "persona": 2,
         "ppl": 1,
         "sandbox": 11,
-        "sep-aks": 30,
+        "sep-aks": 14,
         "usb": 2,
     }
     for group in groups:
