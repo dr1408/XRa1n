@@ -163,6 +163,11 @@ PATCHES: tuple[Patch, ...] = (
     Patch("kernel.sep.set-power-state.gate-2", "sep-aks", 0x0228F330, 0xB4001820, NOP, "Bypass second SEP power-state failure gate"),
     Patch("kernel.sep.prng-reseed.gate", "sep-aks", 0x022398E8, 0x350004A0, NOP, "Bypass SEP PRNG reseed failure gate"),
 
+    # APFS content-protection bypass, verified against XR 22H374 in IDA.
+    # Force apfs_is_valid_class to return true for every caller.
+    Patch("kernel.apfs.is-valid-class.result", "apfs", 0x02EE5E98, 0xD503237F, 0x52800020, "Force apfs_is_valid_class to return true"),
+    Patch("kernel.apfs.is-valid-class.return", "apfs", 0x02EE5E9C, 0xD10183FF, RET, "Early return from apfs_is_valid_class"),
+
     # AKS start, selector-7 case-local shim, and operation-log silencer.
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
     Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
@@ -238,6 +243,7 @@ def resolve(source: Path, groups: set[str]) -> tuple[bytearray, list[dict[str, o
     selected: list[Patch | BlobPatch] = [patch for patch in (*PATCHES, *BLOB_PATCHES) if patch.group in groups]
     expected_counts = {
         "amfi": 12,
+        "apfs": 2,
         "credential-manager": 50,
         "debugger": 2,
         "identity": 2,
@@ -308,7 +314,7 @@ def main() -> None:
     parser.add_argument(
         "--group",
         action="append",
-        choices=("amfi", "credential-manager", "debugger", "identity", "panic", "persona", "ppl", "sandbox", "sep-aks", "usb"),
+        choices=("amfi", "apfs", "credential-manager", "debugger", "identity", "panic", "persona", "ppl", "sandbox", "sep-aks", "usb"),
         dest="groups",
         help="apply only this group (repeatable; can be combined with --profile custom)",
     )
@@ -323,7 +329,7 @@ def main() -> None:
 
     all_groups = {
         "amfi", "credential-manager", "debugger", "identity", "panic",
-        "persona", "ppl", "sandbox", "sep-aks", "usb",
+        "persona", "ppl", "sandbox", "sep-aks", "usb", "apfs",
     }
     profiles = {
         "full": all_groups,
