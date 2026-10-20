@@ -74,6 +74,11 @@ jobs:
           strings -a "$BIN" | grep -Fx '/private/var/tmp/usr/bin'
           strings -a "$BIN" | grep -Fx '/var/jb/usr/sbin'
           strings -a "$BIN" | grep -Fx 'xra1n-jbboot: PATH links ready'
+          strings -a "$BIN" | grep -Fx 'sandbox_extension_issue_file'
+          strings -a "$BIN" | grep -Fx 'com.apple.app-sandbox.read'
+          strings -a "$BIN" | grep -Fx '/private/var/jb'
+          strings -a "$BIN" | grep -Fx '/private/var/tmp/sbext.token'
+          strings -a "$BIN" | grep -Fx 'xra1n-jbboot: sandbox read token refreshed'
           shasum -a 256 "$BIN" | tee "$OUT/SHA256SUMS"
           python3 - <<'PY'
           import json, os, pathlib

@@ -11,4 +11,12 @@ already named by Dropbear's compiled-in PATH:
 
 It waits for the Procursus directories on Data, accepts only exact root-owned
 links, and moves unexpected path occupants aside rather than deleting them.
+
+The same process issues a `com.apple.app-sandbox.read` extension for
+`/private/var/jb` and atomically publishes it as
+`/private/var/tmp/sbext.token`. `systemhook` consumes that token inside
+`iconservicesagent`, allowing rootless application bundles such as Sileo to be
+indexed. The token is recreated on every boot because `/private/var/tmp` is
+ephemeral.
+
 It is an executable, not a dylib, and contains no injection or interposition.
