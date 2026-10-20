@@ -50,13 +50,12 @@ static bool is_expected_sep_less_failure(NSError *error)
         return false;
     }
 
-    id debug_value = error.userInfo[@"NSDebugDescription"];
-    if (![debug_value isKindOfClass:[NSString class]]) {
-        return false;
-    }
-    NSString *debug_description = (NSString *)debug_value;
-    return [debug_description containsString:@"LocationBasedTrustComputer"] &&
-           [debug_description containsString:@"failed: -3"];
+    /* 24A5430a included "LocationBasedTrustComputer" and "failed: -3" in
+     * NSDebugDescription. XR 22H374 returns the same private policy and
+     * LAError tuple but omits that unstable diagnostic text. Policy 1028 is
+     * already checked by the caller, so domain+code remains narrowly scoped
+     * to this explicit Trust-computer evaluation. */
+    return true;
 }
 
 static void l8_evaluatePolicy(id self, SEL command, NSInteger policy,
@@ -73,7 +72,7 @@ static void l8_evaluatePolicy(id self, SEL command, NSInteger policy,
             if (result == nil && is_expected_sep_less_failure(error)) {
                 syslog(LOG_NOTICE,
                        "xra1n-pair: accepted explicit Trust after expected "
-                       "SEP-less policy 1028 failure");
+                       "policy 1028 LAError -1000");
                 reply(@{}, nil);
                 return;
             }
