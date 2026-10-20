@@ -28,7 +28,7 @@ jobs:
           command -v ldid
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Build constructor-only l8pair probe
+      - name: Build pairing and coreauth dylibs
         shell: bash
         run: |
           set -euo pipefail
@@ -63,6 +63,39 @@ jobs:
             work/funny-dylibs/l8pair-probe.arm64e.dylib \
             -output work/funny-dylibs/l8pair-probe.dylib
 
+          for arch in arm64 arm64e; do
+            TARGET="${arch}-apple-ios18.0"
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
+              -fblocks -dynamiclib -Wl,-install_name,/usr/lib/xra1n-pair.dylib \
+              -Wl,-not_for_dyld_shared_cache \
+              -framework CoreFoundation -framework Foundation -framework Security \
+              funny-dylibs/xra1n_pair.c funny-dylibs/xra1n_pair_auth.m \
+              -o "work/funny-dylibs/xra1n-pair.${arch}.dylib"
+            codesign --force --sign - --timestamp=none \
+              "work/funny-dylibs/xra1n-pair.${arch}.dylib"
+            codesign --verify --strict \
+              "work/funny-dylibs/xra1n-pair.${arch}.dylib"
+
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
+              -fblocks -dynamiclib -Wl,-install_name,/usr/lib/xra1n-coreauth.dylib \
+              -Wl,-not_for_dyld_shared_cache -framework Foundation \
+              funny-dylibs/xra1n_coreauth.m \
+              -o "work/funny-dylibs/xra1n-coreauth.${arch}.dylib"
+            codesign --force --sign - --timestamp=none \
+              "work/funny-dylibs/xra1n-coreauth.${arch}.dylib"
+            codesign --verify --strict \
+              "work/funny-dylibs/xra1n-coreauth.${arch}.dylib"
+          done
+
+          for name in xra1n-pair xra1n-coreauth; do
+            lipo -create \
+              "work/funny-dylibs/${name}.arm64.dylib" \
+              "work/funny-dylibs/${name}.arm64e.dylib" \
+              -output "work/funny-dylibs/${name}.dylib"
+          done
+
       - name: Verify artifact
         shell: bash
         run: |
@@ -74,8 +107,30 @@ jobs:
           strings -a "$DYLIB" | grep -Fx '/private/var/root/Library/Lockdown/xra1n-l8pair-probe.log'
           test -z "$(ldid -e "$DYLIB")"
           codesign --verify --strict "$DYLIB"
+          for DYLIB in work/funny-dylibs/xra1n-pair.dylib \
+                       work/funny-dylibs/xra1n-coreauth.dylib; do
+            test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
+            codesign --verify --strict "$DYLIB"
+            test -z "$(ldid -e "$DYLIB")"
+          done
+          otool -D work/funny-dylibs/xra1n-pair.dylib \
+            | grep -Fx '/usr/lib/xra1n-pair.dylib'
+          otool -D work/funny-dylibs/xra1n-coreauth.dylib \
+            | grep -Fx '/usr/lib/xra1n-coreauth.dylib'
+          for arch in arm64 arm64e; do
+            size=$(otool -arch "$arch" -l work/funny-dylibs/xra1n-pair.dylib \
+              | awk '/sectname __interpose/{found=1} found && /size/{print $2; exit}')
+            test "$size" = 0x0000000000000030
+          done
+          strings -a work/funny-dylibs/xra1n-pair.dylib \
+            | grep -Fx '/private/var/root/Library/Lockdown/.xra1n-pairing-fallback'
+          strings -a work/funny-dylibs/xra1n-pair.dylib \
+            | grep -F 'LocationBasedTrustComputer'
+          strings -a work/funny-dylibs/xra1n-coreauth.dylib \
+            | grep -F 'ratchetStateFromState:'
           file "$DYLIB"
-          shasum -a 256 "$DYLIB" | tee work/funny-dylibs/SHA256SUMS
+          shasum -a 256 work/funny-dylibs/*.dylib \
+            | tee work/funny-dylibs/SHA256SUMS
 
       - name: Upload funny dylibs
         uses: actions/upload-artifact@v4
@@ -83,6 +138,8 @@ jobs:
           name: funny-dylibs-${{ github.sha }}
           path: |
             work/funny-dylibs/l8pair-probe.dylib
+            work/funny-dylibs/xra1n-pair.dylib
+            work/funny-dylibs/xra1n-coreauth.dylib
             work/funny-dylibs/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
