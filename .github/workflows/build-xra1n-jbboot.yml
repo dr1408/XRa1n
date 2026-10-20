@@ -1,0 +1,103 @@
+name: Build XRa1n JBBoot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xra1n-jbboot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout XRa1n
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install verification tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ldid-procursus
+          command -v ldid
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build signed universal helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=work/xra1n-jbboot
+          SOURCE=jbboot/xra1n_jbboot.c
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos --find clang)"
+          mkdir -p "$OUT"
+
+          for arch in arm64 arm64e; do
+            "$CLANG" \
+              -target "${arch}-apple-ios18.0" \
+              -isysroot "$SDK" \
+              -Os -fvisibility=hidden -fno-common \
+              -Wall -Wextra -Werror \
+              -Wl,-dead_strip \
+              "$SOURCE" \
+              -o "$OUT/xra1n-jbboot.${arch}"
+            codesign --force --sign - --timestamp=none \
+              -i com.xra1n.jbboot "$OUT/xra1n-jbboot.${arch}"
+            codesign --verify --strict "$OUT/xra1n-jbboot.${arch}"
+          done
+
+          lipo -create \
+            "$OUT/xra1n-jbboot.arm64" \
+            "$OUT/xra1n-jbboot.arm64e" \
+            -output "$OUT/xra1n-jbboot"
+
+      - name: Verify artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=work/xra1n-jbboot
+          BIN="$OUT/xra1n-jbboot"
+          test "$(lipo -archs "$BIN")" = "arm64 arm64e"
+          codesign --verify --strict "$BIN"
+          test -z "$(ldid -e "$BIN")"
+          test "$(codesign -d --verbose=4 "$BIN" 2>&1 | sed -n 's/^Identifier=//p')" = \
+            com.xra1n.jbboot
+          file "$BIN" | grep -F 'universal binary'
+          strings -a "$BIN" | grep -Fx '/private/var/tmp/bin'
+          strings -a "$BIN" | grep -Fx '/var/jb/usr/bin'
+          strings -a "$BIN" | grep -Fx '/private/var/tmp/usr/bin'
+          strings -a "$BIN" | grep -Fx '/var/jb/usr/sbin'
+          strings -a "$BIN" | grep -Fx 'xra1n-jbboot: PATH links ready'
+          shasum -a 256 "$BIN" | tee "$OUT/SHA256SUMS"
+          python3 - <<'PY'
+          import json, os, pathlib
+          out = pathlib.Path('work/xra1n-jbboot')
+          metadata = {
+              'artifact': 'xra1n-jbboot',
+              'commit': os.environ['GITHUB_SHA'],
+              'architectures': ['arm64', 'arm64e'],
+              'deploymentTarget': 'iOS 18.0',
+              'identifier': 'com.xra1n.jbboot',
+              'installPath': '/usr/local/bin/xra1n-jbboot',
+              'entitlements': None,
+          }
+          (out / 'build-metadata.json').write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + '\n')
+          PY
+
+      - name: Upload xra1n-jbboot
+        uses: actions/upload-artifact@v4
+        with:
+          name: xra1n-jbboot-${{ github.sha }}
+          path: |
+            work/xra1n-jbboot/xra1n-jbboot
+            work/xra1n-jbboot/SHA256SUMS
+            work/xra1n-jbboot/build-metadata.json
+          if-no-files-found: error
+          retention-days: 14
