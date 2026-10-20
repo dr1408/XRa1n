@@ -125,7 +125,7 @@ jobs:
           strings -a work/funny-dylibs/xra1n-pair.dylib \
             | grep -Fx '/private/var/root/Library/Lockdown/.xra1n-pairing-fallback'
           strings -a work/funny-dylibs/xra1n-pair.dylib \
-            | grep -F 'policy 1028 LAError -1000'
+            | grep -F 'policy 1028 measured LA failure'
           strings -a work/funny-dylibs/xra1n-coreauth.dylib \
             | grep -F 'ratchetStateFromState:'
           file "$DYLIB"

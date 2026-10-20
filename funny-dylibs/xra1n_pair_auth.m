@@ -71,17 +71,24 @@ static bool pairing_fallback_enabled(void)
 
 static bool is_expected_sep_less_failure(NSError *error)
 {
-    if (error == nil || error.code != -1000 ||
+    if (error == nil ||
         ![error.domain isEqualToString:@"com.apple.LocalAuthentication"]) {
         return false;
     }
 
-    /* 24A5430a included "LocationBasedTrustComputer" and "failed: -3" in
-     * NSDebugDescription. XR 22H374 returns the same private policy and
-     * LAError tuple but omits that unstable diagnostic text. Policy 1028 is
-     * already checked by the caller, so domain+code remains narrowly scoped
-     * to this explicit Trust-computer evaluation. */
-    return true;
+    id debug_value = error.userInfo[@"NSDebugDescription"];
+    if (![debug_value isKindOfClass:[NSString class]]) {
+        return false;
+    }
+    NSString *debug_description = (NSString *)debug_value;
+    if (error.code == -1000) {
+        return [debug_description containsString:@"LocationBasedTrustComputer"] &&
+               [debug_description containsString:@"failed: -3"];
+    }
+    /* Measured on XR 22H374 before first unlock. */
+    return error.code == -1008 &&
+           [debug_description containsString:@"DTO policies are not available"] &&
+           [debug_description containsString:@"before first unlock"];
 }
 
 static void l8_evaluatePolicy(id self, SEL command, NSInteger policy,
@@ -99,20 +106,7 @@ static void l8_evaluatePolicy(id self, SEL command, NSInteger policy,
                 is_expected_sep_less_failure(error)) {
                 syslog(LOG_NOTICE,
                        "xra1n-pair: accepted explicit Trust after expected "
-                       "policy 1028 LAError -1000");
-                reply(@{}, nil);
-                return;
-            }
-            /* Diagnostic XR build: explicit Trust is the only lockdownd flow
-             * under test. Accept another failed private LA policy once, while
-             * recording its exact policy and NSError for the final narrow
-             * selector. Successful evaluations are never modified. */
-            if (result == nil && error != nil) {
-                append_diagnostic(policy, result, error,
-                                  "temporary-trust-fallback");
-                syslog(LOG_NOTICE,
-                       "xra1n-pair: temporary XR Trust fallback policy %ld",
-                       (long)policy);
+                       "policy 1028 measured LA failure");
                 reply(@{}, nil);
                 return;
             }
