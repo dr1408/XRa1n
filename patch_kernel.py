@@ -168,13 +168,35 @@ PATCHES: tuple[Patch, ...] = (
     Patch("kernel.apfs.is-valid-class.result", "apfs", 0x02EE5E98, 0xD503237F, 0x52800020, "Force apfs_is_valid_class to return true"),
     Patch("kernel.apfs.is-valid-class.return", "apfs", 0x02EE5E9C, 0xD10183FF, RET, "Early return from apfs_is_valid_class"),
 
-    # AKS start, broad USBLiter8-style externalMethod success override, and
-    # operation-log silencer.  This intentionally affects every AKS selector:
-    # AppleKeyStoreUserClient::externalMethod returns kIOReturnSuccess before
-    # validating arguments or entering the selector dispatcher.
+    # AKS start plus selector-aware state shims.  Do not stub the
+    # AppleKeyStoreUserClient::externalMethod entry: callers require the
+    # selector-specific output buffers to be populated, and a blanket success
+    # leaves those buffers zeroed.  Selector 7 is the scalar lock-state query;
+    # selector 17 returns the two-word device state {ss, sls} through the
+    # structureOutput buffer.
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
-    Patch("kernel.aks.external-method-success", "sep-aks", 0x02245F64, 0xD503237F, MOV_X0_ZERO, "Force every AKS externalMethod selector to return success"),
-    Patch("kernel.aks.external-method-return", "sep-aks", 0x02245F68, 0xD10643FF, RET, "Return immediately from the forced AKS externalMethod success path"),
+    Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
+    Patch("kernel.aks.selector7.02", "sep-aks", 0x0223E7FC, 0xB900B3FF, 0xF9401288, "Load scalarInput"),
+    Patch("kernel.aks.selector7.03", "sep-aks", 0x0223E800, 0xB90133FF, 0xB40001A8, "Validate scalarInput"),
+    Patch("kernel.aks.selector7.04", "sep-aks", 0x0223E804, 0x6F00E400, 0xB9402A88, "Load scalarInputCount"),
+    Patch("kernel.aks.selector7.05", "sep-aks", 0x0223E808, 0xAD0883E0, 0x7100051F, "Require one scalar input"),
+    Patch("kernel.aks.selector7.06", "sep-aks", 0x0223E80C, 0xAD0783E0, 0x54000141, "Reject invalid scalar input count"),
+    Patch("kernel.aks.selector7.07", "sep-aks", 0x0223E810, 0x3D803BE0, 0xF9402689, "Load scalarOutput"),
+    Patch("kernel.aks.selector7.08", "sep-aks", 0x0223E814, 0xB9402A88, 0xB4000109, "Validate scalarOutput"),
+    Patch("kernel.aks.selector7.09", "sep-aks", 0x0223E818, 0x7100051F, 0xB9405288, "Load scalarOutputCount"),
+    Patch("kernel.aks.selector7.10", "sep-aks", 0x0223E81C, 0x54030181, 0x7100051F, "Require one scalar output"),
+    Patch("kernel.aks.selector7.11", "sep-aks", 0x0223E820, 0xB9405288, 0x540000A1, "Reject invalid scalar output count"),
+    Patch("kernel.aks.selector7.12", "sep-aks", 0x0223E824, 0x7100051F, 0xD28000C8, "Synthesize noPin | beenUnlocked state"),
+    Patch("kernel.aks.selector7.13", "sep-aks", 0x0223E828, 0x54030121, 0xF9000128, "Store synthesized AKS state"),
+    Patch("kernel.aks.selector7.14", "sep-aks", 0x0223E82C, 0x12800008, 0x52800013, "Set selector-7 success result"),
+    Patch("kernel.aks.selector7.15", "sep-aks", 0x0223E830, 0xB900BFE8, 0x14001807, "Branch to authenticated success epilogue"),
+    Patch("kernel.aks.selector7.16", "sep-aks", 0x0223E834, 0xF9401288, 0x52805853, "Build kIOReturnBadArgument low half"),
+    Patch("kernel.aks.selector7.17", "sep-aks", 0x0223E838, 0xB9400102, 0x72BC0013, "Build kIOReturnBadArgument high half"),
+    Patch("kernel.aks.selector7.18", "sep-aks", 0x0223E83C, 0x9102F3E3, 0x14001804, "Branch bad arguments to authenticated epilogue"),
+    # Selector 17 returns an encoded AppleKeyStore state record, not two raw
+    # integers. Preserve the native BTI J and redirect its body to an isolated
+    # case-local block that emits DER { bh=-6, ss=4, sls=3 }.
+    Patch("kernel.aks.selector17.redirect", "sep-aks", 0x0223F51C, 0xF90073FF, 0x14000747, "Redirect selector-17 to its DER state shim"),
     Patch("kernel.aks.external-method-log", "sep-aks", 0x022461AC, 0x97C93C9A, NOP, "Silence replaced AKS externalMethod operation log"),
 
     # AMFI and policy helpers (12 records).
@@ -208,6 +230,14 @@ PATCHES: tuple[Patch, ...] = (
 
 
 BLOB_PATCHES: tuple[BlobPatch, ...] = (
+    BlobPatch(
+        "kernel.aks.selector17.der-state",
+        "sep-aks",
+        0x02241238,
+        bytes.fromhex("885240b9595880521900bc72c8830035881240f9020140b9e3c30291e00316aae10318aa42ebff97f90300aac0820035e2b340b9e00240f9e4830391e5030391e10315aae3031aaa84c5ff97f90300aa60800035e07340f9e1c340b930abc797c07f00b4e10314aaa9b6ff97f90300aafb030014"),
+        bytes.fromhex("892e40f9290200b48a3240f95f7900f1c30100540b0200106c3540a92c3500a96c0940f92c0900f96c1940b92c1900b96c3940792c390079c80380d2883200f91900805210040014595880521900bc720d040014311c30070c0262680201fa30070c02737302010430080c03736c730201030000"),
+        "Emit DER AKS state with ss=4 and sls=3 for selector 17",
+    ),
     BlobPatch("kernel.identity.release.1", "identity", 0x0003ECAF, b"/RELEASE_ARM64_T8020", b"/PATCHED_ARM64_T8020", "Mark first kernel identity string patched"),
     BlobPatch("kernel.identity.release.2", "identity", 0x0003ED1E, b"/RELEASE_ARM64_T8020", b"/PATCHED_ARM64_T8020", "Mark second kernel identity string patched"),
 )
@@ -217,7 +247,7 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def resolve(source: Path, groups: set[str]) -> tuple[bytearray, list[dict[str, object]]]:
+def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
     data = bytearray(source.read_bytes())
     actual = sha256(data)
     if actual != KERNEL_SHA256:
@@ -227,27 +257,9 @@ def resolve(source: Path, groups: set[str]) -> tuple[bytearray, list[dict[str, o
             f"    got      {actual}"
         )
 
-    selected: list[Patch | BlobPatch] = [patch for patch in (*PATCHES, *BLOB_PATCHES) if patch.group in groups]
-    expected_counts = {
-        "amfi": 12,
-        "apfs": 2,
-        "credential-manager": 50,
-        "debugger": 2,
-        "identity": 2,
-        "panic": 4,
-        "persona": 2,
-        "ppl": 1,
-        "sandbox": 11,
-        "sep-aks": 14,
-        "usb": 2,
-    }
-    for group in groups:
-        count = sum(patch.group == group for patch in selected)
-        if count != expected_counts[group]:
-            raise SystemExit(
-                f"[!] internal {group} inventory mismatch: "
-                f"expected {expected_counts[group]}, got {count}"
-            )
+    selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
+    if len(selected) != 120:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 120, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
@@ -290,22 +302,8 @@ def resolve(source: Path, groups: set[str]) -> tuple[bytearray, list[dict[str, o
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("kernel", type=Path, nargs="?", help="pristine decompressed XR 22H374 kernelcache")
+    parser.add_argument("kernel", type=Path, help="pristine decompressed XR 22H374 kernelcache")
     parser.add_argument("output", type=Path, nargs="?", default=Path("kernelcache.patched"))
-    parser.add_argument(
-        "--profile",
-        choices=("full", "no-sep-aks", "no-credential-manager", "no-sep-aks-no-acm", "custom"),
-        help=("select a named diagnostic profile; full is the existing all-groups behavior. "
-              "Profiles excluding groups are experiments, not confirmed bootable kernels"),
-    )
-    parser.add_argument(
-        "--group",
-        action="append",
-        choices=("amfi", "apfs", "credential-manager", "debugger", "identity", "panic", "persona", "ppl", "sandbox", "sep-aks", "usb"),
-        dest="groups",
-        help="apply only this group (repeatable; can be combined with --profile custom)",
-    )
-    parser.add_argument("--list-profiles", action="store_true", help="print profile contents and exit")
     parser.add_argument("--check", action="store_true", help="validate without writing")
     parser.add_argument(
         "--records",
@@ -314,44 +312,13 @@ def main() -> None:
     )
     arguments = parser.parse_args()
 
-    all_groups = {
-        "amfi", "credential-manager", "debugger", "identity", "panic",
-        "persona", "ppl", "sandbox", "sep-aks", "usb", "apfs",
-    }
-    profiles = {
-        "full": all_groups,
-        "no-sep-aks": all_groups - {"sep-aks"},
-        "no-credential-manager": all_groups - {"credential-manager"},
-        "no-sep-aks-no-acm": all_groups - {"sep-aks", "credential-manager"},
-    }
-    if arguments.list_profiles:
-        for name, selected in profiles.items():
-            print(f"{name}: {', '.join(sorted(selected))}")
-        print("custom: specify one or more --group values")
-        return
-    if arguments.kernel is None:
-        parser.error("kernel is required unless --list-profiles is used")
-
-    if arguments.profile and arguments.profile != "custom" and arguments.groups:
-        parser.error("use either a named --profile or repeated --group values, not both")
-    if arguments.profile == "custom" and not arguments.groups:
-        parser.error("--profile custom requires at least one --group")
-    if arguments.profile == "custom" or arguments.groups:
-        groups = set(arguments.groups or ())
-        profile_name = "custom"
-    else:
-        profile_name = arguments.profile or "full"
-        groups = set(profiles[profile_name])
-
     if not arguments.kernel.is_file():
         raise SystemExit(f"[!] kernel not found: {arguments.kernel}")
-    data, records = resolve(arguments.kernel, groups)
-    print(f"[+] profile: {profile_name} ({len(records)} patch records)")
-    for group in sorted(groups):
-        print(f"[+] {group}: resolved {sum(r['group'] == group for r in records)} guarded records")
+    data, records = resolve(arguments.kernel)
+    print(f"[+] resolved {len(records)} guarded kernel patch records")
 
     if arguments.check:
-        print("[+] selected kernel patch groups validated; no files written")
+        print("[+] kernel patch plan validated; no files written")
         return
 
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

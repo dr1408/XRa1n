@@ -19,22 +19,12 @@ on:
         description: Build identity variant containing the kernelcache
         required: true
         default: Erase
-      patch_profile:
-        description: Kernel patch set (reduced profiles are diagnostic and may not boot)
-        type: choice
-        required: true
-        default: full
-        options:
-          - full
-          - no-sep-aks
-          - no-credential-manager
-          - no-sep-aks-no-acm
 
 permissions:
   contents: read
 
 concurrency:
-  group: patched-kernel-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}-${{ inputs.patch_profile }}
+  group: patched-kernel-${{ github.ref }}-${{ inputs.device }}-${{ inputs.build }}
   cancel-in-progress: true
 
 jobs:
@@ -46,7 +36,6 @@ jobs:
       BUILD: ${{ inputs.build }}
       BOARD: ${{ inputs.board }}
       IDENTITY: ${{ inputs.identity }}
-      PATCH_PROFILE: ${{ inputs.patch_profile }}
       # Pin the exact Liter8 implementation whose FirmwareArtifact policy uses
       # Apple's iBoot-restricted Compression algorithm 0x891.
       LITER8_REPOSITORY: https://github.com/gru2007/Liter8-iPad8.git
@@ -193,13 +182,11 @@ jobs:
           python3 patch_kernel.py \
             work/kernelcache.stock.raw \
             work/kernelcache.patched.raw \
-            --profile "$PATCH_PROFILE" \
             --check \
             | tee work/output/kernel-patch-check.log
           python3 patch_kernel.py \
             work/kernelcache.stock.raw \
             work/kernelcache.patched.raw \
-            --profile "$PATCH_PROFILE" \
             --records work/output/kernel-patches.json \
             | tee work/output/kernel-patch.log
 
@@ -229,7 +216,6 @@ jobs:
           {
             echo "device=$DEVICE"
             echo "build=$BUILD"
-            echo "patch_profile=$PATCH_PROFILE"
             echo "liter8_commit=$LITER8_COMMIT"
             echo "patched_raw_round_trip=PASS"
             echo "patch_records=$(python3 -c 'import json; print(len(json.load(open("work/output/kernel-patches.json"))))')"
@@ -243,7 +229,7 @@ jobs:
       - name: Upload patched kernel
         uses: actions/upload-artifact@v4
         with:
-          name: PatchedKernel-0x891-${{ inputs.device }}-${{ inputs.build }}-${{ inputs.patch_profile }}
+          name: PatchedKernel-0x891-${{ inputs.device }}-${{ inputs.build }}
           path: work/output/
           if-no-files-found: error
           retention-days: 14
