@@ -9,7 +9,8 @@
 #include <syslog.h>
 #include <unistd.h>
 
-extern "C" void MSHookMemory(void *target, const uint8_t *data, uint64_t size);
+using mshook_memory_t = void (*)(void *, const uint8_t *, uint64_t);
+static mshook_memory_t g_hook_memory;
 
 static std::atomic<bool> g_patched{false};
 static const char kLogPath[] = "/var/jb/tmp/xra1n-commcenter-hook.log";
@@ -50,7 +51,11 @@ static void image_added(const mach_header *image, intptr_t)
         marker("XRA1N_COMMCENTER family patch preimage mismatch\n");
         return;
     }
-    MSHookMemory(site, replacement, sizeof(replacement));
+    if (g_hook_memory == nullptr) {
+        marker("XRA1N_COMMCENTER MSHookMemory unavailable\n");
+        return;
+    }
+    g_hook_memory(site, replacement, sizeof(replacement));
     if (memcmp(site, replacement, sizeof(replacement)) == 0)
         marker("XRA1N_COMMCENTER family translation AND -> ORR active\n");
     else
@@ -60,6 +65,9 @@ static void image_added(const mach_header *image, intptr_t)
 __attribute__((constructor)) static void init(void)
 {
     marker("XRA1N_COMMCENTER hook loaded\n");
+    void *ellekit = dlopen("/var/jb/usr/lib/libellekit.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (ellekit != nullptr)
+        g_hook_memory = reinterpret_cast<mshook_memory_t>(dlsym(ellekit, "MSHookMemory"));
     _dyld_register_func_for_add_image(image_added);
     marker("XRA1N_COMMCENTER waiting for KCommandDrivers\n");
 }

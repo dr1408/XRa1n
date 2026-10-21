@@ -59,7 +59,8 @@ jobs:
           strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER family translation AND -> ORR active'
           strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER family patch preimage mismatch'
           strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER waiting for KCommandDrivers'
-          nm -u "$D" | grep -F MSHookMemory
+          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER MSHookMemory unavailable'
+          strings -a "$D" | grep -Fx /var/jb/usr/lib/libellekit.dylib
           strings -a "$D" | grep -Fx /var/jb/tmp/xra1n-commcenter-hook.log
           plutil -lint "$OUT/XRa1nCommCenter.plist"
           plutil -extract Filter.Executables.0 raw "$OUT/XRa1nCommCenter.plist" \
