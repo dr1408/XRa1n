@@ -1,0 +1,85 @@
+name: Build XR CommCenter cellular patch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commcenter-cellular-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install signing tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ldid-procursus
+          command -v ldid
+
+      - name: Patch and sign CommCenter
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=bins/CommCenter
+          OUT=work/commcenter-cellular
+          mkdir -p "$OUT"
+
+          python3 patch_commcenter_cellular.py "$SRC" --check
+          ldid -e "$SRC" > "$OUT/CommCenter.entitlements.plist"
+          python3 patch_commcenter_cellular.py "$SRC" "$OUT/CommCenter.unsigned" \
+            --records "$OUT/patch-records.json"
+
+          identifier=$(codesign -d --verbose=4 "$SRC" 2>&1 \
+            | sed -n 's/^Identifier=//p' | head -1)
+          test -n "$identifier"
+          cp "$OUT/CommCenter.unsigned" "$OUT/CommCenter"
+          ldid -I"$identifier" -S"$OUT/CommCenter.entitlements.plist" \
+            -Cadhoc "$OUT/CommCenter"
+          codesign -v "$OUT/CommCenter"
+
+          python3 - "$SRC" "$OUT/CommCenter.unsigned" \
+            "$OUT/patch-records.json" "$OUT/CommCenter.entitlements.plist" \
+            "$OUT/CommCenter" <<'PY'
+          import json, pathlib, plistlib, struct, subprocess, sys
+
+          source, unsigned, records_path, entitlements, signed = map(pathlib.Path, sys.argv[1:])
+          original = source.read_bytes()
+          patched = unsigned.read_bytes()
+          records = json.loads(records_path.read_text())
+          assert len(records) == 3
+          expected = bytearray(original)
+          for record in records:
+              offset = record['offset']
+              old = struct.pack('<I', record['original'])
+              new = struct.pack('<I', record['replacement'])
+              assert expected[offset:offset + 4] == old
+              expected[offset:offset + 4] = new
+          assert bytes(expected) == patched, 'unexpected unsigned CommCenter changes'
+          before = plistlib.loads(entitlements.read_bytes())
+          after = plistlib.loads(subprocess.check_output(['ldid', '-e', str(signed)]))
+          assert before == after, 'CommCenter entitlements changed'
+          print('[+] exactly three guarded instructions changed; entitlements preserved')
+          PY
+
+          rm "$OUT/CommCenter.unsigned"
+          (cd "$OUT" && shasum -a 256 CommCenter patch-records.json \
+            CommCenter.entitlements.plist > SHA256SUMS)
+          cat "$OUT/SHA256SUMS"
+
+      - name: Upload verified CommCenter
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr-22H374-commcenter-cellular-${{ github.sha }}
+          path: work/commcenter-cellular/
+          if-no-files-found: error
+          retention-days: 14
