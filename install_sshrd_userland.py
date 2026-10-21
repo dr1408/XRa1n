@@ -33,9 +33,10 @@ SETUP_PRISTINE_SHA256 = "595a9e839dcdba3dbaa93f74e63627f984ab56537ce6687a1a1c9a6
 SETUP_SIGNED_SHA256 = "68c7b8c1db70763465996ac3e152d8a92cd175e60b46523997caddbe33b8880f"
 SETUP_SIGNED = ROOT / "bins/Setup.patched.signed"
 JBBOOT_ARTIFACT = (ROOT / "work/artifacts/xra1n-jbboot" /
-                   "81dfa979d12b11d554de4a7f90afbf59569a21ee/xra1n-jbboot")
-JBBOOT_SHA256 = "8d6f719206c8245b9ce1364fec0877b6503aa5f1c2dc803c7288badda714e1bb"
+                   "90db8e40336e8a9c4a7f3527774f2a0e60b74104/xra1n-jbboot")
+JBBOOT_SHA256 = "c82fa988cd501eb007aab668f20b8f320ab66e052187ebb48896c97915198d5b"
 JBBOOT_UPGRADABLE_SHA256 = {
+    "8d6f719206c8245b9ce1364fec0877b6503aa5f1c2dc803c7288badda714e1bb",
     "42fd6bca0327fc7759768382e325e4a9564b044fac3d0f9c1be9c4f052a28088",
     "7fcaa73960ba36bacfa3e99eed5e4ef834f737629dc7c3f18a2b5f041287dd30",
 }
@@ -142,7 +143,10 @@ def offline_preflight() -> dict[str, bytes]:
     if digest(jbboot) != JBBOOT_SHA256:
         raise RuntimeError("signed xra1n-jbboot artifact hash mismatch")
     for marker in (b"kpersona_alloc", b"kpersona_info",
-                   b"xra1n-jbboot: persona 99 created"):
+                   b"xra1n-jbboot: persona 99 created",
+                   b"/var/jb/usr/bin/uicache",
+                   b"/var/jb/.xra1n-system-apps-registered",
+                   b"xra1n-jbboot: system app registration complete"):
         if jbboot.count(marker) != 2:
             raise RuntimeError(f"xra1n-jbboot universal marker mismatch: {marker!r}")
     patches["xra1n-jbboot"] = jbboot
