@@ -37,14 +37,6 @@ TARGETS = {
         "patches": [
             Patch("restored.fdr-return", 0x7A4B4, 0xAA1A03E0, 0xD2800000,
                   "Return success from RestoredFDRRecover"),
-            Patch("restored.baseband-modern.return-zero", 0x468F0, 0xF0001588, 0xD2800000,
-                  "Make the modern baseband-presence predicate return zero"),
-            Patch("restored.baseband-modern.return", 0x468F4, 0xF9468D08, 0xD65F03C0,
-                  "Return from the modern baseband-presence predicate"),
-            Patch("restored.baseband-legacy.return-zero", 0x46878, 0xD503237F, 0xD2800000,
-                  "Make the legacy baseband-presence predicate return zero"),
-            Patch("restored.baseband-legacy.return", 0x4687C, 0xA9BE4FF4, 0xD65F03C0,
-                  "Return from the legacy baseband-presence predicate"),
         ],
     },
     "asr": {
