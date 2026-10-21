@@ -56,13 +56,10 @@ jobs:
           D="$OUT/XRa1nCommCenter.dylib"
           test "$(lipo -archs "$D")" = "arm64 arm64e"
           otool -D "$D" | grep -Fx /var/jb/usr/lib/TweakInject/XRa1nCommCenter.dylib
-          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER ims ip_type 2 -> 3'
-          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER dyld imports rebound'
+          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER family translation AND -> ORR active'
+          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER family patch preimage mismatch'
           strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER waiting for KCommandDrivers'
-          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER start constructor intercepted'
-          strings -a "$D" | grep -Fx 'XRA1N_COMMCENTER send constructor intercepted'
-          strings -a "$D" | grep -Fx '_ZN6AriSdk33ARI_IBICallPsStartDataCallReq_SDKC1Ev'
-          nm -u "$D" | grep -F dyld_dynamic_interpose
+          nm -u "$D" | grep -F MSHookMemory
           strings -a "$D" | grep -Fx /var/jb/tmp/xra1n-commcenter-hook.log
           plutil -lint "$OUT/XRa1nCommCenter.plist"
           plutil -extract Filter.Executables.0 raw "$OUT/XRa1nCommCenter.plist" \
