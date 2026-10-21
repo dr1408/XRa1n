@@ -677,6 +677,42 @@ chmod 4755 {q(SILEO_PATH + '/giveMeRoot')}
     print("[+] installed and verified Liter8-compatible Sileo.app", flush=True)
 
 
+def install_staged_system_apps(usb: USBSSH, ticket_id: str) -> None:
+    """Copy restored Data-staged Apple apps into System without overwrites."""
+    record = f"/mnt2/xra1n-stage/{ticket_id}/apps-copied.txt"
+    result = usb.script(f"""
+set -eu
+source=/mnt2/staged_system_apps
+destination=/mnt1/Applications
+test -d "$source"
+test -d "$destination"
+/bin/mkdir -p {q(str(Path(record).parent))}
+: > {q(record + '.tmp')}
+for app in "$source"/*.app; do
+    test -d "$app" || continue
+    name=${{app##*/}}
+    if test ! -e "$destination/$name"; then
+        /bin/cp -Rp "$app" "$destination/$name"
+        /usr/sbin/chown -R 0:0 "$destination/$name"
+        printf '%s\n' "$name" >> {q(record + '.tmp')}
+    fi
+done
+/usr/bin/sort -o {q(record + '.tmp')} {q(record + '.tmp')}
+/bin/mv -f {q(record + '.tmp')} {q(record)}
+/usr/sbin/chown 0:0 {q(record)}
+/bin/chmod 0644 {q(record)}
+count=$(/usr/bin/wc -l < {q(record)} | /usr/bin/tr -d ' ')
+if test "$count" -gt 0; then
+    /bin/rm -f /mnt2/jb/.xra1n-system-apps-registered
+fi
+/bin/sync
+printf 'STAGED_SYSTEM_APPS_OK %s\n' "$count"
+""").strip()
+    if not result.startswith("STAGED_SYSTEM_APPS_OK "):
+        raise RuntimeError(f"staged system-app copy failed verification: {result!r}")
+    print(f"[+] {result}; first normal boot will run guarded uicache -a", flush=True)
+
+
 def install_rootless_runtime_compat(usb: USBSSH) -> None:
     """Install the persistent paths required by Sileo and rootless scripts."""
     env_link = "/mnt1/usr/bin/env"
@@ -838,6 +874,7 @@ def main() -> None:
         install_rootless_runtime_compat(usb)
         install_daemons(usb, ticket_id, patches)
         install_setup(usb, ticket_id, patches["Setup"])
+        install_staged_system_apps(usb, ticket_id)
         install_jbboot(usb, ticket_id, patches["xra1n-jbboot"])
         install_sileo(usb, ticket_id, patches["Sileo.app.tar.gz"])
         install_screentime_overrides(usb, ticket_id)
@@ -846,6 +883,7 @@ def main() -> None:
         print("[+] xra1n-jbboot and its launchd-cache job are verified")
         print("[+] Liter8-compatible Sileo is installed and verified")
         print("[+] rootless /usr/bin/env, Sileo state directories and lastlog are verified")
+        print("[+] staged Apple apps copied; jbboot will register them once on normal boot")
         print("[+] No launchd binary, dylib, or prep_bootstrap.sh action was performed")
     finally:
         usb.close()

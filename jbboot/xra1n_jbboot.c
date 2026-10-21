@@ -15,12 +15,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -35,6 +37,10 @@
 #define SANDBOX_EXTENSION_MAILBOX TMP_ROOT "/sbext.token"
 #define WAIT_SECONDS 180
 #define SILEO_PERSONA_ID 99
+#define UICACHE_PATH "/var/jb/usr/bin/uicache"
+#define APP_REGISTRATION_MARKER "/var/jb/.xra1n-system-apps-registered"
+
+extern char **environ;
 
 /* ABI from xnu/bsd/sys/persona.h.  Keep this local: the public iPhoneOS SDK
  * does not install the private persona declarations used by libsystem. */
@@ -324,6 +330,75 @@ static int ensure_sileo_persona(void)
     return 0;
 }
 
+static int register_system_apps_once(void)
+{
+    struct stat status;
+    if (lstat(APP_REGISTRATION_MARKER, &status) == 0) {
+        if (S_ISREG(status.st_mode) && status.st_uid == 0) {
+            puts("xra1n-jbboot: system apps already registered");
+            return 1;
+        }
+        fprintf(stderr, "xra1n-jbboot: unsafe registration marker\n");
+        return 0;
+    }
+    if (errno != ENOENT) {
+        fprintf(stderr, "xra1n-jbboot: cannot inspect registration marker: %s\n",
+                strerror(errno));
+        return 0;
+    }
+
+    char *arguments[] = { (char *)UICACHE_PATH, (char *)"-a", NULL };
+    pid_t child = 0;
+    int result = posix_spawn(&child, UICACHE_PATH, NULL, NULL, arguments, environ);
+    if (result != 0) {
+        fprintf(stderr, "xra1n-jbboot: cannot spawn uicache: %s\n",
+                strerror(result));
+        return 0;
+    }
+    int child_status = 0;
+    while (waitpid(child, &child_status, 0) < 0) {
+        if (errno == EINTR) continue;
+        fprintf(stderr, "xra1n-jbboot: waitpid uicache: %s\n", strerror(errno));
+        return 0;
+    }
+    if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        fprintf(stderr, "xra1n-jbboot: uicache -a failed (status=%d)\n",
+                child_status);
+        return 0;
+    }
+
+    char temporary[PATH_MAX];
+    int amount = snprintf(temporary, sizeof(temporary), "%s.%d.tmp",
+                          APP_REGISTRATION_MARKER, (int)getpid());
+    if (amount < 0 || (size_t)amount >= sizeof(temporary)) return 0;
+    unlink(temporary);
+    int fd = open(temporary,
+                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                  0644);
+    static const char contents[] = "22H374-system-apps-v1\n";
+    int success = fd >= 0 && fchown(fd, 0, 0) == 0 &&
+                  fchmod(fd, 0644) == 0 &&
+                  write_all(fd, contents, sizeof(contents) - 1) &&
+                  fsync(fd) == 0;
+    int saved = errno;
+    if (fd >= 0 && close(fd) != 0 && success) {
+        success = 0;
+        saved = errno;
+    }
+    if (success && rename(temporary, APP_REGISTRATION_MARKER) != 0) {
+        success = 0;
+        saved = errno;
+    }
+    if (!success) {
+        unlink(temporary);
+        fprintf(stderr, "xra1n-jbboot: publish registration marker: %s\n",
+                strerror(saved));
+        return 0;
+    }
+    puts("xra1n-jbboot: system app registration complete");
+    return 1;
+}
+
 int main(void)
 {
     if (getuid() != 0) {
@@ -344,6 +419,9 @@ int main(void)
     }
     if (!refresh_sandbox_extension()) {
         return 5;
+    }
+    if (!register_system_apps_once()) {
+        return 6;
     }
     return 0;
 }
