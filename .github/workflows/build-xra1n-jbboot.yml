@@ -164,6 +164,54 @@ jobs:
             "$OUT/xra1n-jbboot.arm64e" \
             -output "$OUT/xra1n-jbboot"
 
+      - name: Build guarded lhook and sign pinned ElleKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$PWD/work/xra1n-jbboot"
+          BUILD="$PWD/userland/liter8"
+          EK_WORK="$RUNNER_TEMP/xra1n-ellekit"
+          EK_VER=1.2
+          EK_DEB="ellekit_${EK_VER}_iphoneos-arm64.deb"
+          EK_URL="https://ellekit.space/pool/${EK_DEB}"
+          EK_SHA=e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc
+
+          mkdir -p "$OUT" "$EK_WORK/extract"
+          "$BUILD/build.sh"
+          cp "$BUILD/lhook.dylib" "$OUT/lhook"
+          cp "$BUILD/lhookctl" "$OUT/lhookctl"
+          cp "$BUILD/lhook.deny" "$OUT/lhook.deny"
+
+          curl --fail --location --retry 3 -o "$EK_WORK/$EK_DEB" "$EK_URL"
+          test "$(shasum -a 256 "$EK_WORK/$EK_DEB" | awk '{print $1}')" = "$EK_SHA"
+          (cd "$EK_WORK/extract" && ar x "$EK_WORK/$EK_DEB" && \
+            xz -dc data.tar.xz | tar xf - \
+              ./var/jb/usr/lib/ellekit/libinjector.dylib \
+              ./var/jb/usr/lib/ellekit/MobileSafety.dylib \
+              ./var/jb/usr/share/doc/ellekit/LICENSE)
+          mkdir -p "$OUT/ellekit"
+          cp "$EK_WORK/extract/var/jb/usr/lib/ellekit/libinjector.dylib" "$OUT/ellekit/"
+          cp "$EK_WORK/extract/var/jb/usr/lib/ellekit/MobileSafety.dylib" "$OUT/ellekit/"
+          cp "$EK_WORK/extract/var/jb/usr/share/doc/ellekit/LICENSE" "$OUT/ellekit/"
+          cp "$EK_WORK/$EK_DEB" "$OUT/ellekit/"
+
+          for binary in "$OUT/lhook" "$OUT/lhookctl" \
+                        "$OUT/ellekit/libinjector.dylib" \
+                        "$OUT/ellekit/MobileSafety.dylib"; do
+            ldid -S -Cadhoc "$binary"
+            codesign --verify --strict "$binary"
+            test -z "$(ldid -e "$binary")"
+            archs="$(lipo -archs "$binary")"
+            case " $archs " in *" arm64 "*) ;; *) echo "$binary lacks arm64"; exit 1;; esac
+            case " $archs " in *" arm64e "*) ;; *) echo "$binary lacks arm64e"; exit 1;; esac
+          done
+          test "$(stat -f %z "$OUT/lhook.deny")" -gt 0
+          strings -a "$OUT/lhook" | grep -Fx '/var/jb/usr/lib/TweakLoader.dylib'
+          strings -a "$OUT/lhook" | grep -Fx 'LITER8_SANDBOX_READ_TOKEN='
+          strings -a "$OUT/lhook" | grep -Fx 'LITER8_SANDBOX_EXEC_TOKEN='
+          strings -a "$OUT/lhook" | grep -Fx 'xpcproxy'
+          strings -a "$OUT/lhookctl" | grep -Fx 'kern.bootsessionuuid'
+
       - name: Verify artifact
         shell: bash
         run: |
@@ -206,6 +254,11 @@ jobs:
           strings -a "$BIN" | grep -Fx 'xra1n-jbboot: system app registration complete'
           shasum -a 256 "$BIN" | tee "$OUT/SHA256SUMS"
           cat "$OUT/Sileo.app.tar.gz.sha256" >> "$OUT/SHA256SUMS"
+          for file in lhook lhookctl lhook.deny \
+                      ellekit/libinjector.dylib ellekit/MobileSafety.dylib \
+                      ellekit/LICENSE ellekit/ellekit_1.2_iphoneos-arm64.deb; do
+            shasum -a 256 "$OUT/$file" >> "$OUT/SHA256SUMS"
+          done
           python3 - <<'PY'
           import json, os, pathlib
           out = pathlib.Path('work/xra1n-jbboot')
@@ -239,5 +292,9 @@ jobs:
             work/xra1n-jbboot/build-metadata.json
             work/xra1n-jbboot/Sileo.app.tar.gz
             work/xra1n-jbboot/Sileo.app.tar.gz.sha256
+            work/xra1n-jbboot/lhook
+            work/xra1n-jbboot/lhookctl
+            work/xra1n-jbboot/lhook.deny
+            work/xra1n-jbboot/ellekit
           if-no-files-found: error
           retention-days: 14
