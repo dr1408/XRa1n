@@ -34,9 +34,32 @@
 #define SANDBOX_EXTENSION_PATH "/private/var/jb"
 #define SANDBOX_EXTENSION_MAILBOX TMP_ROOT "/sbext.token"
 #define WAIT_SECONDS 180
+#define SILEO_PERSONA_ID 99
+
+/* ABI from xnu/bsd/sys/persona.h.  Keep this local: the public iPhoneOS SDK
+ * does not install the private persona declarations used by libsystem. */
+struct xra1n_persona_info {
+    unsigned int persona_info_version;
+    uid_t persona_id;
+    int persona_type;
+    gid_t persona_gid;
+    unsigned int persona_ngroups;
+    gid_t persona_groups[16];
+    uid_t persona_gmuid;
+    char persona_name[257];
+};
+
+enum {
+    XRA1N_PERSONA_GUEST = 1,
+    XRA1N_PERSONA_MANAGED = 2,
+    XRA1N_PERSONA_PRIV = 3,
+    XRA1N_PERSONA_SYSTEM = 4,
+};
 
 typedef char *(*sandbox_extension_issue_file_t)(const char *, const char *,
                                                  uint32_t);
+typedef int (*kpersona_alloc_t)(struct xra1n_persona_info *, uid_t *);
+typedef int (*kpersona_info_t)(uid_t, struct xra1n_persona_info *);
 
 static int write_all(int fd, const char *buffer, size_t size)
 {
@@ -226,6 +249,81 @@ static int refresh_sandbox_extension(void)
     return 1;
 }
 
+static int persona_exists(kpersona_info_t get_info)
+{
+    struct xra1n_persona_info info;
+    memset(&info, 0, sizeof(info));
+    info.persona_info_version = 1;
+    if (get_info(SILEO_PERSONA_ID, &info) != 0) {
+        return 0;
+    }
+    if (info.persona_id != SILEO_PERSONA_ID) {
+        fprintf(stderr,
+                "xra1n-jbboot: persona query returned unexpected id %u\n",
+                info.persona_id);
+        return 0;
+    }
+    printf("xra1n-jbboot: persona 99 ready (type=%d name=%s)\n",
+           info.persona_type, info.persona_name);
+    return 1;
+}
+
+static int ensure_sileo_persona(void)
+{
+    kpersona_alloc_t allocate =
+        (kpersona_alloc_t)dlsym(RTLD_DEFAULT, "kpersona_alloc");
+    kpersona_info_t get_info =
+        (kpersona_info_t)dlsym(RTLD_DEFAULT, "kpersona_info");
+    if (allocate == NULL || get_info == NULL) {
+        fprintf(stderr, "xra1n-jbboot: persona API unavailable\n");
+        return 0;
+    }
+    if (persona_exists(get_info)) {
+        return 1;
+    }
+
+    const int types[] = {
+        XRA1N_PERSONA_PRIV,
+        XRA1N_PERSONA_SYSTEM,
+        XRA1N_PERSONA_MANAGED,
+        XRA1N_PERSONA_GUEST,
+    };
+    for (size_t index = 0; index < sizeof(types) / sizeof(types[0]); index++) {
+        struct xra1n_persona_info info;
+        memset(&info, 0, sizeof(info));
+        info.persona_info_version = 1;
+        info.persona_id = SILEO_PERSONA_ID;
+        info.persona_type = types[index];
+        info.persona_gid = 0;
+        info.persona_gmuid = 0;
+        (void)snprintf(info.persona_name, sizeof(info.persona_name), "sileo");
+
+        uid_t allocated_id = 0;
+        errno = 0;
+        if (allocate(&info, &allocated_id) == 0) {
+            if (allocated_id != SILEO_PERSONA_ID) {
+                fprintf(stderr,
+                        "xra1n-jbboot: allocated unexpected persona id %u\n",
+                        allocated_id);
+                return 0;
+            }
+            if (!persona_exists(get_info)) {
+                fprintf(stderr,
+                        "xra1n-jbboot: persona 99 absent after allocation\n");
+                return 0;
+            }
+            puts("xra1n-jbboot: persona 99 created");
+            return 1;
+        }
+        fprintf(stderr,
+                "xra1n-jbboot: persona 99 type %d allocation failed: %s\n",
+                types[index], strerror(errno));
+    }
+
+    fprintf(stderr, "xra1n-jbboot: could not create persona 99\n");
+    return 0;
+}
+
 int main(void)
 {
     if (getuid() != 0) {
@@ -241,8 +339,11 @@ int main(void)
         return 3;
     }
     puts("xra1n-jbboot: PATH links ready");
-    if (!refresh_sandbox_extension()) {
+    if (!ensure_sileo_persona()) {
         return 4;
+    }
+    if (!refresh_sandbox_extension()) {
+        return 5;
     }
     return 0;
 }

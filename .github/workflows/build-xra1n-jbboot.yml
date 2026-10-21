@@ -131,6 +131,19 @@ jobs:
           CLANG="$(xcrun --sdk iphoneos --find clang)"
           mkdir -p "$OUT"
 
+          cat > "$OUT/xra1n-jbboot.entitlements" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.security.no-container</key><true/>
+            <key>com.apple.private.skip-library-validation</key><true/>
+            <key>com.apple.private.persona-mgmt</key><true/>
+            <key>com.apple.private.spawn-subsystem-root</key><true/>
+          </dict></plist>
+          EOF
+
           for arch in arm64 arm64e; do
             "$CLANG" \
               -target "${arch}-apple-ios18.0" \
@@ -141,6 +154,7 @@ jobs:
               "$SOURCE" \
               -o "$OUT/xra1n-jbboot.${arch}"
             codesign --force --sign - --timestamp=none \
+              --entitlements "$OUT/xra1n-jbboot.entitlements" \
               -i com.xra1n.jbboot "$OUT/xra1n-jbboot.${arch}"
             codesign --verify --strict "$OUT/xra1n-jbboot.${arch}"
           done
@@ -158,7 +172,19 @@ jobs:
           BIN="$OUT/xra1n-jbboot"
           test "$(lipo -archs "$BIN")" = "arm64 arm64e"
           codesign --verify --strict "$BIN"
-          test -z "$(ldid -e "$BIN")"
+          lipo "$BIN" -thin arm64 -output "$OUT/xra1n-jbboot.verify.arm64"
+          lipo "$BIN" -thin arm64e -output "$OUT/xra1n-jbboot.verify.arm64e"
+          python3 - "$OUT/xra1n-jbboot.verify.arm64" \
+                    "$OUT/xra1n-jbboot.verify.arm64e" \
+                    "$OUT/xra1n-jbboot.entitlements" <<'PY'
+          import pathlib, plistlib, subprocess, sys
+          expected = plistlib.loads(pathlib.Path(sys.argv[3]).read_bytes())
+          for binary in sys.argv[1:3]:
+              actual = plistlib.loads(subprocess.check_output(["ldid", "-e", binary]))
+              if actual != expected:
+                  raise SystemExit(f"xra1n-jbboot entitlement verification failed: {binary}")
+          PY
+          rm "$OUT/xra1n-jbboot.verify.arm64" "$OUT/xra1n-jbboot.verify.arm64e"
           test "$(codesign -d --verbose=4 "$BIN" 2>&1 | sed -n 's/^Identifier=//p')" = \
             com.xra1n.jbboot
           file "$BIN" | grep -F 'universal binary'
@@ -167,6 +193,9 @@ jobs:
           strings -a "$BIN" | grep -Fx '/private/var/tmp/usr/bin'
           strings -a "$BIN" | grep -Fx '/var/jb/usr/sbin'
           strings -a "$BIN" | grep -Fx 'xra1n-jbboot: PATH links ready'
+          strings -a "$BIN" | grep -Fx 'kpersona_alloc'
+          strings -a "$BIN" | grep -Fx 'kpersona_info'
+          strings -a "$BIN" | grep -Fx 'xra1n-jbboot: persona 99 created'
           strings -a "$BIN" | grep -Fx 'sandbox_extension_issue_file'
           strings -a "$BIN" | grep -Fx 'com.apple.app-sandbox.read'
           strings -a "$BIN" | grep -Fx '/private/var/jb'
@@ -184,7 +213,14 @@ jobs:
               'deploymentTarget': 'iOS 18.0',
               'identifier': 'com.xra1n.jbboot',
               'installPath': '/usr/local/bin/xra1n-jbboot',
-              'entitlements': None,
+              'entitlements': [
+                  'platform-application',
+                  'com.apple.private.security.no-sandbox',
+                  'com.apple.private.security.no-container',
+                  'com.apple.private.skip-library-validation',
+                  'com.apple.private.persona-mgmt',
+                  'com.apple.private.spawn-subsystem-root',
+              ],
           }
           (out / 'build-metadata.json').write_text(
               json.dumps(metadata, indent=2, sort_keys=True) + '\n')
