@@ -105,7 +105,7 @@ TWEAK_STACK_FILES = {
     "MobileSafety.dylib": (GUARDED_HOOK_ROOT / "ellekit/MobileSafety.dylib", "9af9aa65dd32fb30dd47930e56080411fe39579cc5b04dc1c67959ee9467b401"),
     "ELLEKIT-LICENSE": (GUARDED_HOOK_ROOT / "ellekit/LICENSE", "ac3842df55783a43c093806730c480cecdd3c011dfb7fd001ec1ed5258fb0c08"),
     "ellekit.deb": (GUARDED_HOOK_ROOT / "ellekit/ellekit_1.2_iphoneos-arm64.deb", "e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc"),
-    "XRa1nCommCenter.dylib": (ROOT / "work/commcenter-hook-artifact/XRa1nCommCenter.dylib", "28ab852c7a9f7815b6fc504792601415a2b7deb9e4afbf7e80743f73274bb96b"),
+    "XRa1nCommCenter.dylib": (ROOT / "work/commcenter-hook-artifact/XRa1nCommCenter.dylib", "f7c2a2e276ffe65ee99081ffa7462884343692af11abc04cdaa5a0d5f2b5a720"),
     "XRa1nCommCenter.plist": (ROOT / "work/commcenter-hook-artifact/XRa1nCommCenter.plist", "455f99d78c4c1583a0d3208921e06cad70583c5379a19f1aebe76a619149759b"),
 }
 TARGETS = {

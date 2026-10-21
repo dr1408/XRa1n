@@ -3,9 +3,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <mach-o/dyld.h>
 #include <syslog.h>
 #include <unistd.h>
+
+/* dyld-interposing.h is private and absent from the public iPhoneOS SDK, but
+ * this stable dyld SPI is exported on the target build. */
+struct dyld_interpose_tuple {
+    const void *replacement;
+    const void *replacee;
+};
+extern "C" void dyld_dynamic_interpose(const mach_header *,
+                                        const dyld_interpose_tuple *, size_t);
 
 #define DYLD_INTERPOSE(replacement, replacee)                                      \
     __attribute__((used)) static struct {                                          \
@@ -16,12 +27,17 @@
         (const void *)(uintptr_t)&replacee                                         \
     }
 
-extern "C" void ari_start_data_call_ctor(void *)
-    __asm__("__ZN6AriSdk33ARI_IBICallPsStartDataCallReq_SDKC1Ev");
-extern "C" void send_proxy_ctor(void *, void *, void *)
-    __asm__("__ZN3ice16SendMsgBaseProxyC1ENSt3__110shared_ptrINS_6ClientEEERN6AriSdk7MsgBaseE");
+using start_data_call_ctor_t = void (*)(void *);
+using send_proxy_ctor_t = void (*)(void *, void *, void *);
+
+static start_data_call_ctor_t g_start_data_call_ctor;
+static send_proxy_ctor_t g_send_proxy_ctor;
 
 static std::atomic<uintptr_t> g_start_request_vtable{0};
+static std::atomic<bool> g_rebound{false};
+static std::atomic<bool> g_start_seen{false};
+static std::atomic<bool> g_send_seen{false};
+static const mach_header *g_interposer_image;
 static const char kLogPath[] = "/var/jb/tmp/xra1n-commcenter-hook.log";
 
 static void marker(const char *line)
@@ -36,7 +52,9 @@ static void marker(const char *line)
 
 static void replacement_start_data_call_ctor(void *self)
 {
-    ari_start_data_call_ctor(self);
+    if (!g_start_seen.exchange(true))
+        marker("XRA1N_COMMCENTER start constructor intercepted\n");
+    g_start_data_call_ctor(self);
     if (self != nullptr) {
         g_start_request_vtable.store(*(uintptr_t *)self, std::memory_order_release);
     }
@@ -54,6 +72,8 @@ static bool exact_ims_apn(uint8_t *request)
 
 static void replacement_send_proxy_ctor(void *self, void *client, void *message)
 {
+    if (!g_send_seen.exchange(true))
+        marker("XRA1N_COMMCENTER send constructor intercepted\n");
     if (message != nullptr) {
         uint8_t *request = (uint8_t *)message;
         uintptr_t expected = g_start_request_vtable.load(std::memory_order_acquire);
@@ -67,13 +87,54 @@ static void replacement_send_proxy_ctor(void *self, void *client, void *message)
             }
         }
     }
-    send_proxy_ctor(self, client, message);
+    g_send_proxy_ctor(self, client, message);
 }
 
-DYLD_INTERPOSE(replacement_start_data_call_ctor, ari_start_data_call_ctor);
-DYLD_INTERPOSE(replacement_send_proxy_ctor, send_proxy_ctor);
+static void image_added(const mach_header *image, intptr_t)
+{
+    Dl_info info{};
+    if (image == nullptr || dladdr(image, &info) == 0 || info.dli_fname == nullptr ||
+        strstr(info.dli_fname, "/libCommCenterKCommandDrivers.dylib") == nullptr)
+        return;
+
+    void *start = dlsym(RTLD_DEFAULT,
+        "_ZN6AriSdk33ARI_IBICallPsStartDataCallReq_SDKC1Ev");
+    void *send = dlsym(RTLD_DEFAULT,
+        "_ZN3ice16SendMsgBaseProxyC1ENSt3__110shared_ptrINS_6ClientEEERN6AriSdk7MsgBaseE");
+    if (start == nullptr || send == nullptr) {
+        marker("XRA1N_COMMCENTER dyld interpose symbols unavailable\n");
+        return;
+    }
+    bool expected = false;
+    if (!g_rebound.compare_exchange_strong(expected, true))
+        return;
+
+    g_start_data_call_ctor = reinterpret_cast<start_data_call_ctor_t>(start);
+    g_send_proxy_ctor = reinterpret_cast<send_proxy_ctor_t>(send);
+    const dyld_interpose_tuple tuples[] = {
+        { reinterpret_cast<const void *>(&replacement_start_data_call_ctor), start },
+        { reinterpret_cast<const void *>(&replacement_send_proxy_ctor), send },
+    };
+    dyld_dynamic_interpose(g_interposer_image, tuples,
+                           sizeof(tuples) / sizeof(tuples[0]));
+    marker("XRA1N_COMMCENTER dyld imports rebound\n");
+}
 
 __attribute__((constructor)) static void init(void)
 {
     marker("XRA1N_COMMCENTER hook loaded\n");
+
+    Dl_info self_info{};
+    if (dladdr(reinterpret_cast<const void *>(&init), &self_info) == 0 ||
+        self_info.dli_fbase == nullptr) {
+        marker("XRA1N_COMMCENTER interposer image unavailable\n");
+        return;
+    }
+    g_interposer_image = reinterpret_cast<const mach_header *>(self_info.dli_fbase);
+
+    /* libinjector loads this tweak after KCommandDrivers has already bound its
+     * imports.  Ask dyld to rebind that image's C1 constructor imports rather
+     * than trying to trampoline the tiny C1/C2 aliases in libARI/libICEClient. */
+    _dyld_register_func_for_add_image(image_added);
+    marker("XRA1N_COMMCENTER waiting for KCommandDrivers\n");
 }
