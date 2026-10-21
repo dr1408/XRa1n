@@ -33,10 +33,11 @@ SETUP_PRISTINE_SHA256 = "595a9e839dcdba3dbaa93f74e63627f984ab56537ce6687a1a1c9a6
 SETUP_SIGNED_SHA256 = "68c7b8c1db70763465996ac3e152d8a92cd175e60b46523997caddbe33b8880f"
 SETUP_SIGNED = ROOT / "bins/Setup.patched.signed"
 JBBOOT_ARTIFACT = (ROOT / "work/artifacts/xra1n-jbboot" /
-                   "879676b450cc3b664e48a267e9c1211fb8a1e9a0/xra1n-jbboot")
-JBBOOT_SHA256 = "7fcaa73960ba36bacfa3e99eed5e4ef834f737629dc7c3f18a2b5f041287dd30"
+                   "81dfa979d12b11d554de4a7f90afbf59569a21ee/xra1n-jbboot")
+JBBOOT_SHA256 = "8d6f719206c8245b9ce1364fec0877b6503aa5f1c2dc803c7288badda714e1bb"
 JBBOOT_UPGRADABLE_SHA256 = {
     "42fd6bca0327fc7759768382e325e4a9564b044fac3d0f9c1be9c4f052a28088",
+    "7fcaa73960ba36bacfa3e99eed5e4ef834f737629dc7c3f18a2b5f041287dd30",
 }
 JBBOOT_PATH = "/mnt1/usr/local/bin/xra1n-jbboot"
 SILEO_ARTIFACT = (ROOT / "work/artifacts/xra1n-jbboot" /
@@ -140,6 +141,10 @@ def offline_preflight() -> dict[str, bytes]:
     jbboot = JBBOOT_ARTIFACT.read_bytes()
     if digest(jbboot) != JBBOOT_SHA256:
         raise RuntimeError("signed xra1n-jbboot artifact hash mismatch")
+    for marker in (b"kpersona_alloc", b"kpersona_info",
+                   b"xra1n-jbboot: persona 99 created"):
+        if jbboot.count(marker) != 2:
+            raise RuntimeError(f"xra1n-jbboot universal marker mismatch: {marker!r}")
     patches["xra1n-jbboot"] = jbboot
     sileo_archive = SILEO_ARTIFACT.read_bytes()
     if digest(sileo_archive) != SILEO_ARCHIVE_SHA256:
@@ -672,6 +677,76 @@ chmod 4755 {q(SILEO_PATH + '/giveMeRoot')}
     print("[+] installed and verified Liter8-compatible Sileo.app", flush=True)
 
 
+def install_rootless_runtime_compat(usb: USBSSH) -> None:
+    """Install the persistent paths required by Sileo and rootless scripts."""
+    env_link = "/mnt1/usr/bin/env"
+    env_target = "/var/jb/usr/bin/env"
+    env_on_data = "/mnt2/jb/usr/bin/env"
+    state = usb.script(f"""
+set -eu
+test -f {q(env_on_data)} && test ! -L {q(env_on_data)}
+if test -L {q(env_link)}; then
+    /usr/bin/readlink {q(env_link)}
+elif test -e {q(env_link)}; then
+    echo REAL_FILE
+else
+    echo ABSENT
+fi
+""").strip()
+    if state == "REAL_FILE":
+        raise RuntimeError("refusing to replace an existing Apple /usr/bin/env")
+    if state not in {"ABSENT", env_target}:
+        raise RuntimeError(f"unexpected /usr/bin/env symlink target: {state!r}")
+
+    usb.script(f"""
+set -eu
+if test ! -L {q(env_link)}; then
+    /bin/ln -s {q(env_target)} {q(env_link)}
+fi
+test "$(/usr/bin/readlink {q(env_link)})" = {q(env_target)}
+
+/bin/mkdir -p /mnt2/jb/var/lib/apt/sileolists/partial
+/usr/sbin/chown 501:501 /mnt2/jb/var/lib/apt/sileolists \
+    /mnt2/jb/var/lib/apt/sileolists/partial
+/bin/chmod 0755 /mnt2/jb/var/lib/apt/sileolists \
+    /mnt2/jb/var/lib/apt/sileolists/partial
+
+/bin/mkdir -p /mnt2/jb/var/cache/apt/archives/partial
+/usr/sbin/chown 501:501 /mnt2/jb/var/cache/apt/archives \
+    /mnt2/jb/var/cache/apt/archives/partial
+/bin/chmod 0755 /mnt2/jb/var/cache/apt/archives \
+    /mnt2/jb/var/cache/apt/archives/partial
+
+: > /mnt2/jb/.installed_usbl8r
+/usr/sbin/chown 0:0 /mnt2/jb/.installed_usbl8r
+/bin/chmod 0644 /mnt2/jb/.installed_usbl8r
+
+/bin/mkdir -p /mnt2/log
+if test ! -e /mnt2/log/lastlog; then : > /mnt2/log/lastlog; fi
+test -f /mnt2/log/lastlog && test ! -L /mnt2/log/lastlog
+/usr/sbin/chown 0:0 /mnt2/log/lastlog
+/bin/chmod 0644 /mnt2/log/lastlog
+/bin/sync
+""")
+
+    verification = usb.script(f"""
+set -eu
+test -L {q(env_link)}
+test "$(/usr/bin/readlink {q(env_link)})" = {q(env_target)}
+test "$(/usr/bin/stat -f %u /mnt2/jb/var/lib/apt/sileolists)" = 501
+test "$(/usr/bin/stat -f %u /mnt2/jb/var/lib/apt/sileolists/partial)" = 501
+test "$(/usr/bin/stat -f %u /mnt2/jb/var/cache/apt/archives)" = 501
+test "$(/usr/bin/stat -f %u /mnt2/jb/var/cache/apt/archives/partial)" = 501
+test -f /mnt2/jb/.installed_usbl8r
+test "$(/usr/bin/stat -f %Lp /mnt2/log/lastlog)" = 644
+printf 'ROOTLESS_RUNTIME_COMPAT_OK\n'
+""")
+    if verification.strip() != "ROOTLESS_RUNTIME_COMPAT_OK":
+        raise RuntimeError("rootless runtime compatibility verification failed")
+    print("[+] Sileo directories, /usr/bin/env compatibility and lastlog verified",
+          flush=True)
+
+
 def install_screentime_overrides(usb: USBSSH, ticket_id: str) -> None:
     """Disable the five Setup-blocking ScreenTime launchd jobs on Data."""
     remote = SCREENTIME_DISABLED_PATH
@@ -760,6 +835,7 @@ def main() -> None:
         usb.start()
         print(usb.script(MOUNT_SCRIPT), end="", flush=True)
         install_bootstrap(usb, ticket_id)
+        install_rootless_runtime_compat(usb)
         install_daemons(usb, ticket_id, patches)
         install_setup(usb, ticket_id, patches["Setup"])
         install_jbboot(usb, ticket_id, patches["xra1n-jbboot"])
@@ -769,6 +845,7 @@ def main() -> None:
         print("[+] ScreenTime jobs disabled through Data's launchd override plist")
         print("[+] xra1n-jbboot and its launchd-cache job are verified")
         print("[+] Liter8-compatible Sileo is installed and verified")
+        print("[+] rootless /usr/bin/env, Sileo state directories and lastlog are verified")
         print("[+] No launchd binary, dylib, or prep_bootstrap.sh action was performed")
     finally:
         usb.close()
