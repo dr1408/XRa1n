@@ -24,9 +24,102 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew install ldid-procursus
+          brew install ldid-procursus xz
           command -v ldid
           xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build Liter8-compatible Sileo payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$PWD/work/xra1n-jbboot"
+          WORK="$RUNNER_TEMP/xra1n-sileo"
+          VER=2.5.1
+          DEB="org.coolstar.sileo_${VER}_iphoneos-arm64.deb"
+          URL="https://github.com/Sileo/Sileo/releases/download/${VER}/${DEB}"
+          EXPECTED=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
+          rm -rf "$WORK"
+          mkdir -p "$WORK/extract" "$OUT"
+          curl --fail --location --retry 3 -o "$WORK/$DEB" "$URL"
+          test "$(shasum -a 256 "$WORK/$DEB" | awk '{print $1}')" = "$EXPECTED"
+          (cd "$WORK/extract" && ar x "$WORK/$DEB" && xz -dc data.tar.xz | tar xf -)
+          APP="$WORK/extract/var/jb/Applications/Sileo.app"
+          test -d "$APP"
+          xz -dc "$WORK/extract/data.tar.xz" | tar tvf - 2>/dev/null | grep -q '^-rws.*giveMeRoot$'
+
+          python3 - "$APP/Sileo" <<'PY'
+          import pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          blob = path.read_bytes()
+          replacements = (
+              (b"/var/jb/.installed_xina15", b"/var/jb/.installed_usbl8r"),
+              (b"mobile:mobile", b"000501:000501"),
+          )
+          for old, new in replacements:
+              if len(old) != len(new) or blob.count(old) != 1:
+                  raise SystemExit(f"unexpected Sileo pre-image count for {old!r}: {blob.count(old)}")
+              blob = blob.replace(old, new)
+          path.write_bytes(blob)
+          PY
+
+          cat > "$WORK/sileo.ent" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>platform-application</key><true/>
+            <key>com.apple.private.security.no-sandbox</key><true/>
+            <key>com.apple.private.security.no-container</key><true/>
+            <key>com.apple.private.security.container-required</key><false/>
+            <key>com.apple.private.skip-library-validation</key><true/>
+            <key>com.apple.private.security.storage-exempt.heritable</key><true/>
+            <key>com.apple.private.persona-mgmt</key><true/>
+            <key>com.apple.private.spawn-subsystem-root</key><true/>
+          </dict></plist>
+          EOF
+          ldid -Iorg.coolstar.SileoStore -S"$WORK/sileo.ent" -Cadhoc "$APP/Sileo"
+          ldid -IgiveMeRoot -S"$WORK/sileo.ent" -Cadhoc "$APP/giveMeRoot"
+          chmod 4755 "$APP/giveMeRoot"
+          test -u "$APP/giveMeRoot"
+
+          python3 - "$APP" <<'PY'
+          import hashlib, os, plistlib, sys
+          app = sys.argv[1]
+          resource = os.path.join(app, "_CodeSignature", "CodeResources")
+          data = plistlib.load(open(resource, "rb"))
+          fixed = 0
+          for section in ("files", "files2"):
+              files = data.get(section)
+              if not isinstance(files, dict):
+                  continue
+              for name, entry in files.items():
+                  target = os.path.join(app, name)
+                  if os.path.basename(name) != "giveMeRoot" or not os.path.isfile(target):
+                      continue
+                  blob = open(target, "rb").read()
+                  if isinstance(entry, dict):
+                      if "hash2" in entry: entry["hash2"] = hashlib.sha256(blob).digest()
+                      if "hash" in entry: entry["hash"] = hashlib.sha1(blob).digest()
+                  else:
+                      files[name] = hashlib.sha1(blob).digest()
+                  fixed += 1
+          if not fixed:
+              raise SystemExit("giveMeRoot is absent from CodeResources")
+          plistlib.dump(data, open(resource, "wb"))
+          PY
+
+          codesign --force --sign - --timestamp=none --entitlements "$WORK/sileo.ent" "$APP"
+          codesign --verify --strict "$APP"
+          python3 - "$APP/Sileo" "$WORK/sileo.ent" <<'PY'
+          import pathlib, plistlib, subprocess, sys
+          actual = plistlib.loads(subprocess.check_output(["ldid", "-e", sys.argv[1]]))
+          expected = plistlib.loads(pathlib.Path(sys.argv[2]).read_bytes())
+          if actual != expected:
+              raise SystemExit("Sileo entitlement verification failed")
+          PY
+          test "$(strings -a "$APP/Sileo" | grep -Fc /var/jb/.installed_usbl8r)" = 1
+          test "$(strings -a "$APP/Sileo" | grep -Fc 000501:000501)" = 1
+          tar -C "$(dirname "$APP")" -czpf "$OUT/Sileo.app.tar.gz" Sileo.app
+          shasum -a 256 "$OUT/Sileo.app.tar.gz" > "$OUT/Sileo.app.tar.gz.sha256"
 
       - name: Build signed universal helper
         shell: bash
@@ -80,6 +173,7 @@ jobs:
           strings -a "$BIN" | grep -Fx '/private/var/tmp/sbext.token'
           strings -a "$BIN" | grep -Fx 'xra1n-jbboot: sandbox read token refreshed'
           shasum -a 256 "$BIN" | tee "$OUT/SHA256SUMS"
+          cat "$OUT/Sileo.app.tar.gz.sha256" >> "$OUT/SHA256SUMS"
           python3 - <<'PY'
           import json, os, pathlib
           out = pathlib.Path('work/xra1n-jbboot')
@@ -104,5 +198,7 @@ jobs:
             work/xra1n-jbboot/xra1n-jbboot
             work/xra1n-jbboot/SHA256SUMS
             work/xra1n-jbboot/build-metadata.json
+            work/xra1n-jbboot/Sileo.app.tar.gz
+            work/xra1n-jbboot/Sileo.app.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14
