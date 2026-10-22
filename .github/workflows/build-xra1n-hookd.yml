@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install signing tool
+      - name: Install verification tool
         run: brew install ldid-procursus
 
       - name: Build and sign hookd
@@ -36,8 +36,9 @@ jobs:
               -Os -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
               -Wl,-dead_strip hookd/xra1n_hookd.c \
               -o "$OUT/xra1n-hookd.${arch}"
-            ldid -Icom.xra1n.hookd -Cadhoc \
-              -Shookd/entitlements.plist "$OUT/xra1n-hookd.${arch}"
+            codesign --force --sign - --timestamp=none \
+              --entitlements hookd/entitlements.plist \
+              -i com.xra1n.hookd "$OUT/xra1n-hookd.${arch}"
             codesign --verify --strict "$OUT/xra1n-hookd.${arch}"
           done
           lipo -create "$OUT/xra1n-hookd.arm64" "$OUT/xra1n-hookd.arm64e" \
