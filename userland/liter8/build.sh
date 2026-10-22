@@ -82,7 +82,6 @@ build_universal() {
 
 build_universal systemhook.dylib systemhook_icon.c dylib
 build_universal sbextissue sbextissue.c executable
-build_universal lhookctl lhookctl.c executable
 
 verify_deps "$BASE/systemhook.dylib" systemhook "/usr/lib/systemhook.dylib
 /usr/lib/libSystem.B.dylib"

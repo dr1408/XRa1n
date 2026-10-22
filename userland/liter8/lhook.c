@@ -1,28 +1,54 @@
-/* Liter8's launchd bootstrap and process-local tweak loader.
- * Only this System-volume image is inserted by dyld. Its constructor consumes
- * /private/var/jb sandbox extensions (read, and map-executable) before
- * dlopening ElleKit.
- * PID 1 and xpcproxy propagate launch state but never load tweaks.
+/*
+ * lhook.dylib - the PID 1 bootstrap for system-wide injection.
+ *
+ * Loaded by dyld as an ordinary weak dependency of /sbin/launchd, not through
+ * DYLD_INSERT_LIBRARIES. launchd strips DYLD_* from job environments and ignores it for
+ * itself, but it cannot strip its own load commands. See LAUNCHD-PID1-HOOK.md.
+ *
+ * Two jobs:
+ *   1. Prove it loaded, by writing a marker naming its own pid.
+ *   2. Interpose posix_spawn and posix_spawnp so every process launchd starts inherits
+ *      the injection, and so does everything they start.
+ *
+ * WHY THE INTERPOSE LIVES HERE AND NOT IN THE PAYLOAD.
+ * dyld resolves DYLD_INTERPOSE through __DATA,__interpose when an image is loaded, and it
+ * does not retroactively rebind images that are already bound. A dylib dlopen'd later
+ * therefore cannot interpose launchd's already-resolved posix_spawn calls. Only an image
+ * present at launch can, and the load command is what makes this one present at launch.
+ * This is also why ElleKit's own pspawn.dylib cannot be reused: it has no __interpose
+ * section and hooks posix_spawn at runtime instead, which needs writable __TEXT and dies
+ * with CODESIGNING / Invalid Page here.
+ *
+ * WHY THE POLICY LIVES IN THE PAYLOAD.
+ * This file is on the sealed System volume. Changing it costs a DFU trip, so it must be
+ * the part that never needs to change. Anything likely to be iterated on belongs in
+ * kPayload, which is on the Data volume and can be replaced over SSH.
+ *
+ * SAFETY. This code runs inside PID 1 and on every spawn on the system. A mistake here is
+ * not a crashed process, it is a device that does not boot. Four guards:
+ *
+ *   1. Nothing happens unless kEnableFile exists. It lives on /var/jb, which is NOT
+ *      mounted while launchd is starting, so early boot is untouched for free and
+ *      injection only begins once the system is up. Deleting the file over SSH, or from
+ *      the ramdisk, disables everything.
+ *   2. A denylist of processes that must never be touched.
+ *   3. A missing payload means passthrough, rather than handing dyld a path that does not
+ *      resolve, which would make every spawn on the system fail.
+ *   4. Tracing is off unless kDebugFile exists. An fopen on every spawn out of launchd is
+ *      both a performance problem and a way to deadlock early boot.
+ *
+ * Guard order matters: the enable file is checked first, so removing it disables
+ * everything below with no further reasoning required.
  */
-#include <dlfcn.h>
-#include <dispatch/dispatch.h>
-#include <errno.h>
-#include <stdint.h>
-#include <os/log.h>
-#include <mach/mach.h>
-#include <mach-o/dyld.h>
+
 #include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <xpc/xpc.h>
-#include "lhook_session.h"
-#include "../../hookd/xra1n_hookd_protocol.h"
 
 #define DYLD_INTERPOSE(_replacement, _replacee)                                        \
     __attribute__((used)) static struct {                                              \
@@ -44,75 +70,49 @@
 #endif
 static const char *kSelf       = LHOOK_SELF_PATH;
 
-#ifndef LHOOK_PAYLOAD_C
-#define LHOOK_PAYLOAD_C "/var/jb/usr/lib/TweakLoader.dylib"
-#endif
-static const char *kLoader = LHOOK_PAYLOAD_C;
-static const char *kPspawn = "/var/jb/usr/lib/ellekit/pspawn.dylib";
-
-/* The rootless-icon payload (systemhook_icon.c), on the System volume for the
- * same reason as kSelf. It is inserted directly rather than loaded through
- * TweakLoader because iconservicesagent needs its read token before the icon
- * service renders anything, and because it is already provisioned and verified
- * by sshrd_provision.sh. It acts only in iconservicesagent and returns after
- * one name comparison everywhere else, so inserting it costs one strcmp per
- * injected spawn. */
+/* Optional diagnostic payloads, injected in this order if present.
+ *
+ * The System copy costs a DFU trip to change; the Data copy can be iterated over SSH.
+ * Production tweak loading does not require either one: kPayload_C below is ElleKit's
+ * loader. Keeping these optional paths preserves the probes used to validate propagation
+ * without making a fresh install depend on them.
+ *
+ * Overridable at build time for the same reason LHOOK_SELF_PATH is: the two-payload path
+ * cannot otherwise be exercised until after deployment, because /usr/lib is read-only at
+ * runtime and the second candidate does not exist yet. Testing it only on PID 1 would
+ * mean discovering a bug there. The production build takes the defaults. */
 #ifndef LHOOK_PAYLOAD_A
 #define LHOOK_PAYLOAD_A "/usr/lib/systemhook.dylib"
 #endif
-static const char *kIcons = LHOOK_PAYLOAD_A;
-/* Sandbox grants the parent mints for an injected child, one environment
- * variable each. Read lets a sandboxed process open /private/var/jb; the
- * container profile checks mapping a dylib executable separately
- * (file-map-executable), so dlopen of TweakLoader and the tweaks also needs
- * the executable class, as other rootless loaders issue for their root. */
-static const char *kGrantRoot = "/private/var/jb";
-static const struct grant { const char *key; const char *cls; } kGrants[] = {
-    { "LITER8_SANDBOX_READ_TOKEN=", "com.apple.app-sandbox.read" },
-    { "LITER8_SANDBOX_EXEC_TOKEN=", "com.apple.sandbox.executable" },
-};
-#define GRANT_COUNT (sizeof(kGrants) / sizeof(kGrants[0]))
-typedef char *(*issue_file_fn)(const char *, const char *, uint32_t);
-typedef int64_t (*consume_fn)(const char *);
+#ifndef LHOOK_PAYLOAD_B
+#define LHOOK_PAYLOAD_B "/var/jb/usr/lib/systemhook.dylib"
+#endif
 
+/* ElleKit's tweak loader, a symlink to usr/lib/ellekit/libinjector.dylib. It scans
+ * /var/jb/usr/lib/TweakInject (which Library/MobileSubstrate/DynamicLibraries symlinks
+ * to), matches each tweak's Filter/Bundles against the host, and dlopens what applies.
+ *
+ * Inserted by dyld rather than dlopen'ed by systemhook, because that is how ElleKit
+ * expects to arrive and it lets dyld order the initializers. Loading ElleKit by hand from
+ * a constructor is what killed SpringBoard during testing; inserted directly it returns 0
+ * and the host survives, which is measured, not assumed.
+ *
+ * Listed last so the tweak loader runs after either optional diagnostic payload. The
+ * path was confirmed mapped in Preferences on this build; do not infer a process-wide
+ * sandbox rule from one target. */
+#ifndef LHOOK_PAYLOAD_C
+#define LHOOK_PAYLOAD_C "/var/jb/usr/lib/TweakLoader.dylib"
+#endif
+
+static const char *kPayloads[] = {
+    LHOOK_PAYLOAD_A,
+    LHOOK_PAYLOAD_B,
+    LHOOK_PAYLOAD_C,
+    NULL
+};
+static const char *kEnableFile = "/var/jb/.lhook_enabled";
 static const char *kDebugFile  = "/var/jb/.lhook_debug";
 static const char *kLogFile    = "/var/jb/tmp/lhook.log";
-static const char *kCommCenterTweak =
-    "/var/jb/usr/lib/TweakInject/XRa1nCommCenter.dylib";
-
-/* Keep one process-specific diagnostic path outside unified logging.  Some
- * daemon sandboxes make `log show` incomplete, which previously left us unable
- * to distinguish "lhook was mapped" from "TweakLoader was dlopened". */
-static int is_commcenter_process(void) {
-    const char *service = getenv("XPC_SERVICE_NAME");
-    if (service && strcmp(service, "com.apple.CommCenter") == 0) return 1;
-    const char *name = getprogname();
-    if (name && strstr(name, "CommCenter")) return 1;
-    char path[1024];
-    uint32_t size = sizeof path;
-    if (_NSGetExecutablePath(path, &size) == 0) {
-        const char *base = strrchr(path, '/');
-        base = base ? base + 1 : path;
-        return strstr(base, "CommCenter") != NULL;
-    }
-    return 0;
-}
-
-static void commcenter_diag(const char *status, const char *detail) {
-    if (!is_commcenter_process()) return;
-    int fd = open(kLogFile, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd < 0) return;
-    char line[768];
-    int length = snprintf(line, sizeof line,
-                          "[lhook] CommCenter pid=%d loader=%s%s%s\n",
-                          getpid(), status, detail ? " detail=" : "",
-                          detail ? detail : "");
-    if (length > 0) {
-        size_t count = (size_t)length < sizeof line ? (size_t)length : sizeof line - 1;
-        (void)write(fd, line, count);
-    }
-    close(fd);
-}
 
 /* The tunable denylist, on the Data volume so it can be edited over SSH. This exists
  * because the first version compiled the list into this dylib, which lives on the sealed
@@ -140,13 +140,15 @@ static const unsigned kRetryMicroseconds = 500000;
 static const char *kHardDeny[] = {
     "launchd", "amfid", "trustd", "securityd", "configd",
     "notifyd", "logd", "opendirectoryd", "keybagd", "watchdogd",
-    "dropbear", "sshd", "xra1n-hookd",
+    "dropbear", "sshd",
     NULL
 };
 
-/* Conservative fallback for services unrelated to tweak loading. */
+/* Used only when kDenyFile is absent. Deliberately conservative: it keeps xpcproxy denied,
+ * which is the behaviour that has already been booted and observed to be stable. Creating
+ * the file is what opts into anything more adventurous. */
 static const char *kDefaultDeny[] = {
-    "diskarbitrationd", "syslogd", "usbmuxd",
+    "xpcproxy", "diskarbitrationd", "syslogd", "usbmuxd",
     "mobile_obliterator", "restored_external", "aslmanager",
     NULL
 };
@@ -157,15 +159,11 @@ static int file_exists(const char *path) {
 }
 
 /* Guard #3. With no payload present there is nothing to inject, and injecting kSelf alone
- * would spread the interposer with no effect.
- *
- * Both payloads count, not just the loader. The icon payload is inserted directly and
- * works on its own, so a device with it installed and no ElleKit still has a reason to
- * inject: measured on n104, where provisioning installs systemhook.dylib but nothing
- * installs /var/jb/usr/lib/TweakLoader.dylib, so gating on the loader alone left
- * iconservicesagent unpatched and every rootless icon blank. */
+ * would spread the interposer with no effect. */
 static int any_payload_exists(void) {
-    return file_exists(kLoader) || file_exists(kIcons);
+    for (int i = 0; kPayloads[i]; i++)
+        if (file_exists(kPayloads[i])) return 1;
+    return 0;
 }
 
 static int name_in(const char **list, const char *name) {
@@ -325,110 +323,82 @@ static void *marker_thread(void *unused) {
 
 /* ------------------------------------------------------------ spawn interposition */
 
-/* Insert only System-volume images. Data-volume libraries must wait until the
- * new process has consumed its sandbox extension, which is why TweakLoader is
- * dlopened by our constructor instead of being inserted here. */
+/* Build a copy of envp with our libraries added to DYLD_INSERT_LIBRARIES.
+ *
+ * An existing value is appended to rather than replaced, because something else may
+ * already be injecting and clobbering it would silently break that. Returns NULL when
+ * nothing needs changing, and the caller then uses the original envp untouched.
+ */
 static const char kInsertKey[] = "DYLD_INSERT_LIBRARIES=";
 #define INSERT_KEY_LEN (sizeof(kInsertKey) - 1)
 
-/* Ownership is explicit: only the array, insert value and token values are
- * ours. Other environment entries remain borrowed from the caller. */
-struct child_env { char **values; char *insert; char *tokens[GRANT_COUNT]; };
+static char **envp_with_insert(char *const envp[], char **allocated) {
+    int n = 0;
+    while (envp && envp[n]) n++;
 
-/* Index of the grant whose key prefixes this entry, or -1. */
-static int grant_key(const char *entry) {
-    for (size_t g = 0; g < GRANT_COUNT; g++)
-        if (!strncmp(entry, kGrants[g].key, strlen(kGrants[g].key))) return (int)g;
-    return -1;
-}
+    /* getenv semantics: the first entry wins, so that is the one whose value is carried
+     * forward. Later duplicates are dropped rather than passed through, otherwise the
+     * child could still see a stale value depending on how it reads the environment. */
+    /* Only inject payloads that exist. Handing dyld a path that does not resolve is the
+     * one mistake here that breaks every spawn on the system. Built before the duplicate
+     * check because that check tests for these exact paths. */
+    char payloads[512];
+    size_t at = 0;
+    for (int i = 0; kPayloads[i]; i++) {
+        if (!file_exists(kPayloads[i])) continue;
+        size_t len = strlen(kPayloads[i]);
+        if (at + len + 2 >= sizeof payloads) break;
+        if (at) payloads[at++] = ':';
+        memcpy(payloads + at, kPayloads[i], len);
+        at += len;
+    }
+    payloads[at] = '\0';
+    if (at == 0) return NULL;
 
-static int own_library(const char *path) {
-    return !strcmp(path, kSelf) || !strcmp(path, kLoader) ||
-        !strcmp(path, kIcons) || !strcmp(path, "/usr/lib/lhook");
-}
+    const char *existing = NULL;
+    for (int i = 0; i < n; i++) {
+        if (strncmp(envp[i], kInsertKey, INSERT_KEY_LEN) != 0) continue;
+        if (!existing) existing = envp[i] + INSERT_KEY_LEN;
+        /* Already carrying the payloads, so appending again would grow the variable
+         * without bound down a deep process tree. Returning NULL here means "no change
+         * needed", and the child still inherits the caller's environment, which already
+         * contains everything.
+         *
+         * The test must be the PAYLOADS, not kSelf. A process that was itself injected
+         * has kSelf in its environment by definition, so using kSelf as the sentinel
+         * makes every injected process refuse to inject its own children, which silently
+         * stops propagation one level down. Measured, not theorised. */
+        if (strstr(envp[i] + INSERT_KEY_LEN, payloads)) return NULL;
+    }
 
-/* True if the caller's environment already carries one of our keys, so a
- * not-injecting spawn still has something to strip. Used only to decide
- * whether the allocating rebuild path is needed at all. */
-static int env_has_our_keys(char *const envp[]) {
-    for (int i = 0; envp && envp[i]; i++) {
-        if (!strncmp(envp[i], kInsertKey, INSERT_KEY_LEN)) return 1;
-        if (grant_key(envp[i]) >= 0) return 1;
+    /* Insert this dylib as well as the payloads. Without lhook itself the child has no
+     * interposer, so propagation would stop one level down and only launchd's direct
+     * children would ever be injected. */
+    char *value = NULL;
+    if (existing) {
+        if (asprintf(&value, "%s%s:%s:%s", kInsertKey, existing, kSelf, payloads) < 0)
+            return NULL;
+    } else {
+        if (asprintf(&value, "%s%s:%s", kInsertKey, kSelf, payloads) < 0)
+            return NULL;
     }
-    return 0;
-}
 
-static void free_child_env(struct child_env *env) {
-    free(env->insert);
-    for (size_t g = 0; g < GRANT_COUNT; g++) free(env->tokens[g]);
-    free(env->values);
-}
+    char **out = calloc(n + 2, sizeof(char *));
+    if (!out) { free(value); return NULL; }
 
-static int make_child_env(char *const input[], int inject, struct child_env *out) {
-    size_t count = 0;
-    const char *existing = NULL, *inherited[GRANT_COUNT] = {0};
-    while (input && input[count]) {
-        const char *v = input[count++];
-        if (!strncmp(v, kInsertKey, INSERT_KEY_LEN) && !existing)
-            existing = v + INSERT_KEY_LEN;
-        int g = grant_key(v);
-        if (g >= 0 && !inherited[g]) inherited[g] = v + strlen(kGrants[g].key);
+    int j = 0;
+    for (int i = 0; i < n; i++) {
+        if (strncmp(envp[i], kInsertKey, INSERT_KEY_LEN) == 0) continue;
+        out[j++] = envp[i];
     }
-    size_t capacity = strlen(kSelf) + strlen(kIcons)
-        + (existing ? strlen(existing) : 0) + 3;
-    char *libraries = calloc(1, capacity);
-    char *copy = existing ? strdup(existing) : NULL;
-    out->values = calloc(count + 2 + GRANT_COUNT, sizeof(char *));
-    if (!libraries || (existing && !copy) || !out->values) {
-        free(libraries); free(copy); return ENOMEM;
-    }
-    if (inject) {
-        /* kSelf first so its constructor consumes the sandbox extension before
-         * any other inserted image runs. Only insert the icon payload when it
-         * is actually present: handing dyld a path that does not resolve is the
-         * one mistake here that breaks every spawn on the system. */
-        strcpy(libraries, kSelf);
-        if (file_exists(kIcons)) { strcat(libraries, ":"); strcat(libraries, kIcons); }
-    }
-    char *cursor = NULL;
-    for (char *part = copy ? strtok_r(copy, ":", &cursor) : NULL;
-         part; part = strtok_r(NULL, ":", &cursor)) {
-        if (own_library(part)) continue;
-        if (*libraries) strcat(libraries, ":");
-        strcat(libraries, part);
-    }
-    free(copy);
-    if (*libraries && asprintf(&out->insert, "%s%s", kInsertKey, libraries) < 0) {
-        out->insert = NULL; free(libraries); return ENOMEM;
-    }
-    free(libraries);
-    /* Only where there is a loader to dlopen. The icon payload needs none of
-     * this, and the strip below drops any inherited tokens rather than passing
-     * on a grant this spawn would not have minted. */
-    if (inject && file_exists(kLoader)) {
-        /* A sandboxed descendant may be unable to issue a new extension. The
-         * inherited bearer remains valid for this boot and this directory. */
-        issue_file_fn issue = (issue_file_fn)dlsym(RTLD_DEFAULT, "sandbox_extension_issue_file");
-        for (size_t g = 0; g < GRANT_COUNT; g++) {
-            char *fresh = issue ? issue(kGrants[g].cls, kGrantRoot, 0) : NULL;
-            const char *token = fresh ? fresh : inherited[g];
-            if (token && *token &&
-                asprintf(&out->tokens[g], "%s%s", kGrants[g].key, token) < 0) {
-                out->tokens[g] = NULL; free(fresh); return ENOMEM;
-            }
-            free(fresh);
-        }
-    }
-    size_t used = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (!strncmp(input[i], kInsertKey, INSERT_KEY_LEN) || grant_key(input[i]) >= 0)
-            continue;
-        out->values[used++] = input[i];
-    }
-    if (out->insert) out->values[used++] = out->insert;
-    for (size_t g = 0; g < GRANT_COUNT; g++)
-        if (out->tokens[g]) out->values[used++] = out->tokens[g];
-    return 0;
+    out[j++] = value;
+    out[j] = NULL;
+
+    /* Hand the caller the exact pointer we allocated. Finding it again by prefix search
+     * is wrong: every other entry belongs to the caller, and a duplicate key in their
+     * environment would make the search free their memory instead of ours. */
+    *allocated = value;
+    return out;
 }
 
 static int spawn_common(int (*real)(pid_t *, const char *,
@@ -438,27 +408,21 @@ static int spawn_common(int (*real)(pid_t *, const char *,
                         const posix_spawn_file_actions_t *actions,
                         const posix_spawnattr_t *attr,
                         char *const argv[], char *const envp[]) {
-    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
-
-    /* Early-boot fast path. During launchd's own startup /var/jb is not mounted,
-     * so inject is false and there is nothing of ours to strip. Do not allocate
-     * and do not rebuild the environment: just spawn. This path runs on every
-     * spawn out of PID 1 before the system is up, where any failure is an
-     * unbootable device. */
-    if (!inject && !env_has_our_keys(envp))
+    if (!file_exists(kEnableFile) || denied(path) || !any_payload_exists())
         return real(pid, path, actions, attr, argv, envp);
 
-    struct child_env child = {0};
-    if (make_child_env(envp, inject, &child) != 0) {
-        /* Allocation failed. Spawn with the caller's unmodified environment
-         * rather than failing the spawn: a failed spawn in PID 1 is far worse
-         * than a missed injection. */
-        free_child_env(&child);
-        return real(pid, path, actions, attr, argv, envp);
-    }
-    if (inject) trace("[lhook] injecting %s\n", path ? path : "(null)");
-    int rc = real(pid, path, actions, attr, argv, child.values);
-    free_child_env(&child);
+    trace("[lhook] injecting %s\n", path ? path : "(null)");
+
+    char *allocated = NULL;
+    char **newenv = envp_with_insert(envp, &allocated);
+    if (!newenv) return real(pid, path, actions, attr, argv, envp);
+
+    int rc = real(pid, path, actions, attr, argv, newenv);
+
+    /* Free exactly what we allocated. Every other entry in newenv belongs to the caller
+     * and must not be touched. */
+    free(allocated);
+    free(newenv);
     return rc;
 }
 
@@ -479,281 +443,16 @@ static int my_posix_spawnp(pid_t *pid, const char *path,
 DYLD_INTERPOSE(my_posix_spawn,  posix_spawn)
 DYLD_INTERPOSE(my_posix_spawnp, posix_spawnp)
 
-/* ---------------------------------------------------------------- hookd broker
- * Clients send the narrow patch request to their bootstrap port (launchd).
- * Because this image is present before launchd binds libxpc, the static
- * interpose sees that message without modifying launchd __TEXT. PID 1 replaces
- * the untrusted pid with the Mach audit-token pid, then forwards the request to
- * a private hookd child. hookd itself accepts messages only from PID 1. */
-extern mach_msg_header_t *dispatch_mach_msg_get_msg(void *, size_t *);
-extern int xpc_receive_mach_msg(void *, void *, void *, void *, xpc_object_t *);
-extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t [], uint32_t);
-
-static pthread_mutex_t g_hookd_lock = PTHREAD_MUTEX_INITIALIZER;
-static pid_t g_hookd_pid = -1;
-static mach_port_t g_hookd_port = MACH_PORT_NULL;
-static const char *kHookdPath = "/var/jb/usr/libexec/xra1n-hookd";
-
-static pid_t audit_token_pid(audit_token_t token) { return (pid_t)token.val[5]; }
-
-static int hookd_start_locked(void) {
-    if (g_hookd_pid > 0 && kill(g_hookd_pid, 0) == 0 && MACH_PORT_VALID(g_hookd_port))
-        return 0;
-    if (!file_exists(kHookdPath)) return ENOENT;
-    if (MACH_PORT_VALID(g_hookd_port)) {
-        mach_port_deallocate(mach_task_self(), g_hookd_port);
-        g_hookd_port = MACH_PORT_NULL;
-    }
-    mach_port_t checkin = MACH_PORT_NULL;
-    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &checkin);
-    if (kr != KERN_SUCCESS) return (int)kr;
-    kr = mach_port_insert_right(mach_task_self(), checkin, checkin, MACH_MSG_TYPE_MAKE_SEND);
-    if (kr != KERN_SUCCESS) {
-        mach_port_destroy(mach_task_self(), checkin);
-        return (int)kr;
-    }
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    mach_port_t ports[] = { MACH_PORT_NULL, MACH_PORT_NULL, checkin };
-    int result = posix_spawnattr_set_registered_ports_np(&attr, ports, 3);
-    if (result == 0) {
-        char *const argv[] = { (char *)kHookdPath, NULL };
-        char *const envp[] = { "_SafeMode=1", NULL };
-        result = posix_spawn(&g_hookd_pid, kHookdPath, NULL, &attr, argv, envp);
-    }
-    posix_spawnattr_destroy(&attr);
-    if (result != 0) {
-        mach_port_destroy(mach_task_self(), checkin);
-        return result;
-    }
-    uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE] = {0};
-    mach_msg_header_t *header = (mach_msg_header_t *)buffer;
-    kr = mach_msg(header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(buffer),
-                  checkin, 5000, MACH_PORT_NULL);
-    mach_port_destroy(mach_task_self(), checkin);
-    if (kr != KERN_SUCCESS || !MACH_PORT_VALID(header->msgh_remote_port))
-        return kr == KERN_SUCCESS ? EPROTO : (int)kr;
-    g_hookd_port = header->msgh_remote_port;
-    mach_port_mod_refs(mach_task_self(), g_hookd_port, MACH_PORT_RIGHT_SEND, 1);
-    mach_msg_destroy(header);
-    return 0;
-}
-
-static kern_return_t forward_to_hookd(struct xra1n_hookd_request *request,
-                                      struct xra1n_hookd_reply *reply,
-                                      mach_msg_size_t reply_capacity) {
-    pthread_mutex_lock(&g_hookd_lock);
-    int start = hookd_start_locked();
-    if (start != 0) {
-        pthread_mutex_unlock(&g_hookd_lock);
-        return start;
-    }
-    mach_port_t reply_port = mig_get_reply_port();
-    request->hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
-                                             MACH_MSG_TYPE_MAKE_SEND_ONCE);
-    request->hdr.msgh_remote_port = g_hookd_port;
-    request->hdr.msgh_local_port = reply_port;
-    request->hdr.msgh_voucher_port = MACH_PORT_NULL;
-    request->hdr.msgh_id = XRA1N_HOOKD_MSG_ID;
-    kern_return_t kr = mach_msg(&request->hdr, MACH_SEND_MSG,
-                                request->hdr.msgh_size, 0, MACH_PORT_NULL,
-                                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-    if (kr == KERN_SUCCESS) {
-        reply->hdr.msgh_size = sizeof(*reply);
-        kr = mach_msg(&reply->hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
-                      reply_capacity, reply_port, 5000, MACH_PORT_NULL);
-    }
-    pthread_mutex_unlock(&g_hookd_lock);
-    return kr;
-}
-
-static void reply_to_client(struct xra1n_hookd_request *original,
-                            kern_return_t status) {
-    struct xra1n_hookd_reply reply = {0};
-    mach_msg_type_name_t bits = MACH_MSGH_BITS_REMOTE(original->hdr.msgh_bits);
-    if (bits == MACH_MSG_TYPE_COPY_SEND) bits = MACH_MSG_TYPE_MOVE_SEND;
-    reply.hdr.msgh_bits = MACH_MSGH_BITS(bits, 0);
-    reply.hdr.msgh_size = sizeof(reply);
-    reply.hdr.msgh_remote_port = original->hdr.msgh_remote_port;
-    reply.hdr.msgh_id = original->hdr.msgh_id + 100;
-    reply.magic = XRA1N_HOOKD_MAGIC;
-    reply.action = XRA1N_HOOKD_ACTION_PATCH;
-    reply.status = status;
-    if (mach_msg_send(&reply.hdr) == KERN_SUCCESS) {
-        original->hdr.msgh_remote_port = MACH_PORT_NULL;
-        original->hdr.msgh_bits &= ~MACH_MSGH_BITS_REMOTE_MASK;
-    }
-}
-
-static int my_xpc_receive_mach_msg(void *message, void *a2, void *a3, void *a4,
-                                   xpc_object_t *out) {
-    size_t capacity = 0;
-    struct xra1n_hookd_request *incoming =
-        (struct xra1n_hookd_request *)dispatch_mach_msg_get_msg(message, &capacity);
-    if (getpid() == 1 && incoming && capacity >= sizeof(*incoming) &&
-        incoming->hdr.msgh_size == sizeof(*incoming) &&
-        incoming->magic == XRA1N_HOOKD_MAGIC &&
-        incoming->action == XRA1N_HOOKD_ACTION_PATCH &&
-        incoming->data_size > 0 && incoming->data_size <= XRA1N_HOOKD_MAX_DATA) {
-        size_t rounded = (incoming->hdr.msgh_size + 3u) & ~3u;
-        if (capacity >= rounded + sizeof(mach_msg_audit_trailer_t)) {
-            mach_msg_audit_trailer_t *trailer =
-                (mach_msg_audit_trailer_t *)((uint8_t *)incoming + rounded);
-            struct xra1n_hookd_request forwarded = *incoming;
-            forwarded.client_pid = audit_token_pid(trailer->msgh_audit);
-            struct {
-                struct xra1n_hookd_reply reply;
-                uint8_t trailer[MAX_TRAILER_SIZE];
-            } hookd_response = {0};
-            kern_return_t kr = forward_to_hookd(&forwarded, &hookd_response.reply,
-                                                sizeof(hookd_response));
-            kern_return_t status = kr == KERN_SUCCESS ? hookd_response.reply.status : kr;
-            reply_to_client(incoming, status);
-        }
-    }
-    return xpc_receive_mach_msg(message, a2, a3, a4, out);
-}
-
-DYLD_INTERPOSE(my_xpc_receive_mach_msg, xpc_receive_mach_msg)
-
-/* This entry point is also used by the standalone sandbox regression test.
- * A failure leaves the host running without tweaks; it never aborts launch. */
-/* Consume one of the minted extensions. 0 if it was consumed or was never
- * offered, -1 if it was offered and refused. */
-static int consume_grant(size_t g) {
-    char name[64];
-    size_t length = strlen(kGrants[g].key) - 1; /* without '=' */
-    if (length >= sizeof name) return 0;
-    memcpy(name, kGrants[g].key, length);
-    name[length] = '\0';
-    const char *token = getenv(name);
-    if (!token || !*token) return 0;
-    consume_fn consume = (consume_fn)dlsym(RTLD_DEFAULT, "sandbox_extension_consume");
-    if (consume && consume(token) >= 0) return 0;
-    os_log_error(OS_LOG_DEFAULT, "Liter8: sandbox grant %{public}s failed pid=%d",
-                 kGrants[g].cls, getpid());
-    return -1;
-}
-
-int liter8_load_tweaks(void) {
-    if (getpid() == 1) return 0;
-    commcenter_diag("entry", getprogname());
-    /* Read first: the checks below are themselves reads of /var/jb. Deciding
-     * before consuming it cost injection in every profile that denies the
-     * rootless tree until the extension lands; measured on 24B5099f,
-     * iconservicesagent logged "deny(1) file-read-data /var/jb/.lhook_enabled"
-     * and loaded nothing. The executable grant stays withheld until there is
-     * something to dlopen, which was the point of gating at all. */
-    int read_grant = consume_grant(0);
-    commcenter_diag(read_grant == 0 ? "read-grant-ok" : "read-grant-failed", NULL);
-    if (read_grant != 0) return -1;
-    int enabled = lhook_session_enabled();
-    commcenter_diag(enabled ? "session-enabled" : "session-disabled", NULL);
-    if (!enabled) return 0;
-    /* Never load TweakLoader in xpcproxy: upstream ElleKit and Dopamine both
-     * avoid that ordering.  Load ElleKit's pspawn component instead.  Unlike
-     * dyld interposition, pspawn patches the spawn implementation inline and
-     * can therefore propagate the loader across xpcproxy's private handoff to
-     * the final service executable. */
-    if (!strcmp(getprogname(), "xpcproxy")) {
-        if (!file_exists(kPspawn)) {
-            trace("[lhook] xpcproxy pspawn missing: %s\n", kPspawn);
-            return 0;
-        }
-        int exec_grant = consume_grant(1);
-        trace(exec_grant == 0
-                  ? "[lhook] xpcproxy executable grant accepted: %s\n"
-                  : "[lhook] xpcproxy executable grant refused: %s\n",
-              kPspawn);
-        dlerror();
-        void *pspawn = dlopen(kPspawn, RTLD_NOW | RTLD_GLOBAL);
-        if (!pspawn) {
-            const char *error = dlerror();
-            trace("[lhook] xpcproxy pspawn load failed: %s\n",
-                  error ? error : "unknown dlopen error");
-            return -3;
-        }
-        trace("[lhook] xpcproxy pspawn loaded: %s\n", kPspawn);
-        return 0;
-    }
-    int is_denied = denied(getprogname());
-    commcenter_diag(is_denied ? "policy-denied" : "policy-allowed", getprogname());
-    if (is_denied) return 0;
-    if (!file_exists(kLoader)) {
-        char error[96];
-        snprintf(error, sizeof error, "%s errno=%d", kLoader, errno);
-        commcenter_diag("loader-missing", error);
-        return 0;
-    }
-    commcenter_diag("loader-visible", kLoader);
-    /* Only matters to profiles that check file-map-executable, so a refusal is
-     * logged and the load continues. */
-    int exec_grant = consume_grant(1);
-    commcenter_diag(exec_grant == 0 ? "exec-grant-ok" : "exec-grant-failed", NULL);
-    /* Loading the loader here, from the constructor, rather than inserting it.
-     *
-     * The fork this port comes from records the opposite, at its own lhook.c:97:
-     * "Loading ElleKit by hand from a constructor is what killed SpringBoard
-     * during testing; inserted directly it returns 0 and the host survives,
-     * which is measured, not assumed." That is a real measurement, but on
-     * t8020 / iPadOS 26.7.1, and it is about an insert this path cannot perform:
-     * a Data-volume library has no sandbox extension at DYLD_INSERT_LIBRARIES
-     * time, which is the whole reason the grants above are consumed first (see
-     * the spawn interposition comment).
-     *
-     * Measured here instead, on n104 / 24B5099f, 2026-10-12, with injection
-     * armed and `launchctl kickstart -k user/501/com.apple.SpringBoard`:
-     *
-     *   enabled  -> SpringBoard respawned as pid 4521, logged "ElleKit loaded
-     *               pid=4521 executable=SpringBoard" from this dlopen, then held
-     *               the same pid across repeated checks. Reproduced once more as
-     *               pid 4635. No SpringBoard crash report was written.
-     *   disabled -> respawned as pid 4605, zero ElleKit loads device-wide, also
-     *               stable. That half is what shows the enabled result is not
-     *               just injection having stayed off.
-     *
-     * So this ordering survives on this platform. If that ever stops being
-     * true, the fix is not to move the load into the insert list: it is to make
-     * the extension available before dyld runs, or to defer the dlopen off the
-     * constructor. The insert list is also third-party-owned, and rewriting it
-     * is what the spawn path deliberately avoids. */
-    commcenter_diag("attempt", kLoader);
-    dlerror();
-    void *loader = dlopen(kLoader, RTLD_NOW | RTLD_GLOBAL);
-    if (!loader) {
-        const char *error = dlerror();
-        commcenter_diag("failed", error ? error : "unknown dlopen error");
-        os_log_error(OS_LOG_DEFAULT, "Liter8: ElleKit load failed pid=%d %{public}s", getpid(), error);
-        return -2;
-    }
-    commcenter_diag("loaded", kLoader);
-    /* ElleKit intentionally suppresses individual tweak dlopen errors.  Probe
-     * the one CommCenter-only payload explicitly so this single diagnostic
-     * build reports its complete load result rather than requiring another
-     * System-volume replacement.  dlopen is idempotent if ElleKit loaded it. */
-    if (is_commcenter_process()) {
-        dlerror();
-        void *tweak = dlopen(kCommCenterTweak, RTLD_NOW | RTLD_GLOBAL);
-        if (tweak) {
-            commcenter_diag("commcenter-tweak-loaded", kCommCenterTweak);
-        } else {
-            const char *error = dlerror();
-            commcenter_diag("commcenter-tweak-failed",
-                            error ? error : "unknown dlopen error");
-        }
-    }
-    os_log_error(OS_LOG_DEFAULT, "Liter8: ElleKit loaded pid=%d executable=%{public}s", getpid(), getprogname());
-    return 1;
-}
-
-#ifndef LHOOK_NO_CONSTRUCTOR
 __attribute__((constructor))
 static void lhook_init(void) {
-    (void)liter8_load_tweaks();
     char message[64];
     int length = build_message(message, (int)sizeof(message));
-    if (file_exists(kDebugFile)) write_console(message, length);
-    if (try_write_marker(message, length) || getpid() != 1) return;
+    write_console(message, length);
+
+    /* Synchronously first, so a short-lived process still leaves proof it ran. A detached
+     * thread loses that race: the process exits before it is scheduled. */
+    if (try_write_marker(message, length)) return;
+
     pthread_t thread;
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) != 0) return;
@@ -761,4 +460,3 @@ static void lhook_init(void) {
     (void)pthread_create(&thread, &attr, marker_thread, NULL);
     pthread_attr_destroy(&attr);
 }
-#endif
