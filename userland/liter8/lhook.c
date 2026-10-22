@@ -619,9 +619,32 @@ static void start_commcenter_deferred_loader(void) {
     pthread_attr_destroy(&attr);
 }
 
+/* The 22H374 XPC handoff can replace the xpcproxy program image after the
+ * constructor-created thread has disappeared.  A dyld add-image callback is
+ * the reliable boundary: it observes CommCenter's Mach-O as it is mapped.  Do
+ * not dlopen recursively under dyld's callback lock; start the same bounded
+ * deferred loader and let it run after the callback returns. */
+static volatile int gCommCenterImageSeen;
+
+static void commcenter_image_added(const struct mach_header *header,
+                                   intptr_t slide) {
+    (void)slide;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        if (_dyld_get_image_header(i) != header) continue;
+        const char *path = _dyld_get_image_name(i);
+        if (!path || !strstr(path, "/CoreTelephony.framework/Support/CommCenter"))
+            return;
+        if (__sync_bool_compare_and_swap(&gCommCenterImageSeen, 0, 1))
+            start_commcenter_deferred_loader();
+        return;
+    }
+}
+
 #ifndef LHOOK_NO_CONSTRUCTOR
 __attribute__((constructor))
 static void lhook_init(void) {
+    _dyld_register_func_for_add_image(commcenter_image_added);
     (void)liter8_load_tweaks();
     if (getpid() != 1 && !strcmp(getprogname(), "xpcproxy"))
         start_commcenter_deferred_loader();
