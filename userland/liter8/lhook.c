@@ -125,15 +125,6 @@ static const int kMarkerPathCount = 3;
 static const int kMaxAttempts = 120;
 static const unsigned kRetryMicroseconds = 500000;
 
-/* xpcproxy does not exec CommCenter on 22H374.  It maps the service into the
- * existing process after our constructor has already run, so neither
- * getprogname(), XPC_SERVICE_NAME nor _NSGetExecutablePath identify
- * CommCenter at constructor time.  Keep this retry deliberately narrow and
- * bounded: it exists only in an injected xpcproxy, stops as soon as the
- * process identifies as CommCenter, and otherwise dies after 30 seconds. */
-static const int kCommCenterMaxAttempts = 120;
-static const unsigned kCommCenterRetryMicroseconds = 250000;
-
 /* Compiled in and NOT overridable. Injecting any of these does not produce a crashed
  * process, it produces a device that does not come back, or one that cannot be reached
  * to fix it. dropbear and sshd are here for that second reason: they are the only way in.
@@ -482,6 +473,67 @@ static int my_posix_spawnp(pid_t *pid, const char *path,
 DYLD_INTERPOSE(my_posix_spawn,  posix_spawn)
 DYLD_INTERPOSE(my_posix_spawnp, posix_spawnp)
 
+/* iOS 16+ xpcproxy transitions to the service through libsystem_kernel's
+ * private entry points, bypassing the public posix_spawn/execve wrappers.
+ * Propagate the same insert list and sandbox grants across that final exec so
+ * lhook is initialized again with the real service executable path. */
+struct _posix_spawn_args_desc;
+extern int __posix_spawn(pid_t *, const char *, struct _posix_spawn_args_desc *,
+                         char *const *, char *const *);
+extern int __execve(const char *, char *const *, char *const *);
+
+static int my___posix_spawn(pid_t *pid, const char *path,
+                            struct _posix_spawn_args_desc *desc,
+                            char *const argv[], char *const envp[]) {
+    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
+    if (!inject && !env_has_our_keys(envp))
+        return __posix_spawn(pid, path, desc, argv, envp);
+
+    struct child_env child = {0};
+    if (make_child_env(envp, inject, &child) != 0) {
+        free_child_env(&child);
+        return __posix_spawn(pid, path, desc, argv, envp);
+    }
+    if (inject) trace("[lhook] private spawn injecting %s\n", path ? path : "(null)");
+    int rc = __posix_spawn(pid, path, desc, argv, child.values);
+    free_child_env(&child);
+    return rc;
+}
+
+static int my___execve(const char *path, char *const argv[], char *const envp[]) {
+    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
+    if (!inject && !env_has_our_keys(envp)) return __execve(path, argv, envp);
+
+    struct child_env child = {0};
+    if (make_child_env(envp, inject, &child) != 0) {
+        free_child_env(&child);
+        return __execve(path, argv, envp);
+    }
+    if (inject) trace("[lhook] exec injecting %s\n", path ? path : "(null)");
+    int rc = __execve(path, argv, child.values);
+    free_child_env(&child); /* reached only when exec fails */
+    return rc;
+}
+
+static int my_execve(const char *path, char *const argv[], char *const envp[]) {
+    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
+    if (!inject && !env_has_our_keys(envp)) return execve(path, argv, envp);
+
+    struct child_env child = {0};
+    if (make_child_env(envp, inject, &child) != 0) {
+        free_child_env(&child);
+        return execve(path, argv, envp);
+    }
+    if (inject) trace("[lhook] public exec injecting %s\n", path ? path : "(null)");
+    int rc = execve(path, argv, child.values);
+    free_child_env(&child); /* reached only when exec fails */
+    return rc;
+}
+
+DYLD_INTERPOSE(my___posix_spawn, __posix_spawn)
+DYLD_INTERPOSE(my___execve, __execve)
+DYLD_INTERPOSE(my_execve, execve)
+
 /* This entry point is also used by the standalone sandbox regression test.
  * A failure leaves the host running without tweaks; it never aborts launch. */
 /* Consume one of the minted extensions. 0 if it was consumed or was never
@@ -594,60 +646,10 @@ int liter8_load_tweaks(void) {
     return 1;
 }
 
-/* CommCenter's xpcproxy-to-service transition happens after constructors.
- * Calling the normal entry point here preserves all existing session, policy,
- * sandbox-extension and loader checks; this thread changes timing only. */
-static void *commcenter_deferred_loader(void *unused) {
-    (void)unused;
-    for (int attempt = 0; attempt < kCommCenterMaxAttempts; attempt++) {
-        if (is_commcenter_process()) {
-            commcenter_diag("deferred-transition", getprogname());
-            (void)liter8_load_tweaks();
-            return NULL;
-        }
-        usleep(kCommCenterRetryMicroseconds);
-    }
-    return NULL;
-}
-
-static void start_commcenter_deferred_loader(void) {
-    pthread_t thread;
-    pthread_attr_t attr;
-    if (pthread_attr_init(&attr) != 0) return;
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    (void)pthread_create(&thread, &attr, commcenter_deferred_loader, NULL);
-    pthread_attr_destroy(&attr);
-}
-
-/* The 22H374 XPC handoff can replace the xpcproxy program image after the
- * constructor-created thread has disappeared.  A dyld add-image callback is
- * the reliable boundary: it observes CommCenter's Mach-O as it is mapped.  Do
- * not dlopen recursively under dyld's callback lock; start the same bounded
- * deferred loader and let it run after the callback returns. */
-static volatile int gCommCenterImageSeen;
-
-static void commcenter_image_added(const struct mach_header *header,
-                                   intptr_t slide) {
-    (void)slide;
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        if (_dyld_get_image_header(i) != header) continue;
-        const char *path = _dyld_get_image_name(i);
-        if (!path || !strstr(path, "/CoreTelephony.framework/Support/CommCenter"))
-            return;
-        if (__sync_bool_compare_and_swap(&gCommCenterImageSeen, 0, 1))
-            start_commcenter_deferred_loader();
-        return;
-    }
-}
-
 #ifndef LHOOK_NO_CONSTRUCTOR
 __attribute__((constructor))
 static void lhook_init(void) {
-    _dyld_register_func_for_add_image(commcenter_image_added);
     (void)liter8_load_tweaks();
-    if (getpid() != 1 && !strcmp(getprogname(), "xpcproxy"))
-        start_commcenter_deferred_loader();
     char message[64];
     int length = build_message(message, (int)sizeof(message));
     if (file_exists(kDebugFile)) write_console(message, length);
