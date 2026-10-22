@@ -20,6 +20,89 @@ MOV_X0_ZERO = 0xD2800000
 RET = 0xD65F03C0
 
 
+def branch(source: int, target: int) -> int:
+    """Encode an ARM64 unconditional branch between fixed file offsets."""
+    delta = target - source
+    if delta % 4 or not -(1 << 27) <= delta < (1 << 27):
+        raise ValueError(f"ARM64 branch out of range: {source:#x} -> {target:#x}")
+    return 0x14000000 | ((delta // 4) & 0x03FFFFFF)
+
+
+def conditional_branch(source: int, target: int, condition: int) -> int:
+    """Encode an ARM64 B.cond between fixed file offsets."""
+    delta = target - source
+    if delta % 4 or not -(1 << 20) <= delta < (1 << 20):
+        raise ValueError(f"ARM64 conditional branch out of range: {source:#x} -> {target:#x}")
+    return 0x54000000 | (((delta // 4) & 0x7FFFF) << 5) | condition
+
+
+def adr(source: int, target: int, register: int) -> int:
+    """Encode ADR for a nearby, potentially unaligned DER byte string."""
+    delta = target - source
+    if not -(1 << 20) <= delta < (1 << 20):
+        raise ValueError(f"ARM64 ADR out of range: {source:#x} -> {target:#x}")
+    return 0x10000000 | ((delta & 3) << 29) | (((delta >> 2) & 0x7FFFF) << 5) | register
+
+
+def aks_full_state_der() -> bytes:
+    """Build selector 35's complete 14-member state record."""
+    values: dict[str, int | bytes] = {
+        "bh": -6, "cxw": 0, "lt": 0, "mua": 0, "sas": 0,
+        "sb": 0, "sfa": 0, "sgpe": 0, "sgs": 0, "sls": 3,
+        "sms": 0, "srcd": 0, "ss": 6, "uuid": bytes(16),
+    }
+    members: list[bytes] = []
+    for name, value in values.items():
+        key = name.encode("ascii")
+        encoded_key = bytes((0x0C, len(key))) + key
+        encoded_value = (b"\x04\x10" + value if isinstance(value, bytes)
+                         else b"\x02\x01" + bytes((value & 0xFF,)))
+        member = encoded_key + encoded_value
+        members.append(bytes((0x30, len(member))) + member)
+    body = b"".join(sorted(members))
+    if len(body) != 154:
+        raise AssertionError("unexpected AKS state DER length")
+    return b"\x31\x81" + bytes((len(body),)) + body
+
+
+SELECTOR_GATE_CODE = 0x0228E928
+EXTERNAL_METHOD_NATIVE = 0x0223C964
+SELECTOR35_CODE = 0x02218CBC
+SELECTOR35_DATA = SELECTOR35_CODE + 72
+SELECTOR35_EPILOGUE = 0x022422BC
+SELECTOR35_DER = aks_full_state_der()
+
+
+def selector_gate_code() -> bytes:
+    """Broadly succeed selector 10 and dispatch every other selector natively."""
+    words = [
+        0xD503237F,  # pacibsp; replaced at the externalMethod entry
+        0x7100283F,  # cmp w1, #10 (_aks_wrap_key)
+        conditional_branch(SELECTOR_GATE_CODE + 0x08, EXTERNAL_METHOD_NATIVE, 1),  # b.ne
+        MOV_X0_ZERO,
+        0xD50323FF,  # autibsp before the broad early return
+        RET,
+        NOP,
+        NOP,
+        NOP,
+        NOP,
+    ]
+    return struct.pack("<10I", *words)
+
+
+def selector35_code() -> bytes:
+    """Copy the full DER into structureOutput, respecting its capacity."""
+    words = list(struct.unpack("<18I", bytes.fromhex(
+        "892e40f9c90100b48a3240f95f7502f1630100540b000010ac1380d2"
+        "6d1540382d1500388c0500f1a1ffff54a81380d2883200f919008052"
+        "00000014595880521900bc7200000014"
+    )))
+    words[5] = adr(SELECTOR35_CODE + 0x14, SELECTOR35_DATA, 11)
+    words[14] = branch(SELECTOR35_CODE + 0x38, SELECTOR35_EPILOGUE)
+    words[17] = branch(SELECTOR35_CODE + 0x44, SELECTOR35_EPILOGUE)
+    return struct.pack("<18I", *words)
+
+
 @dataclass(frozen=True)
 class Patch:
     id: str
@@ -171,8 +254,11 @@ PATCHES: tuple[Patch, ...] = (
     # AKS start plus selector-aware state shims.  Do not stub the
     # AppleKeyStoreUserClient::externalMethod entry: callers require the
     # selector-specific output buffers to be populated. Selector 7 supplies
-    # scalar state; selector 17 returns a short DER record. Other cases,
-    # including selector 35, retain their native implementation.
+    # scalar state; selector 17 returns a short DER record; selector 35 gets
+    # the complete state record. Only selector 10 receives broad success;
+    # every other selector keeps its native implementation.
+    Patch("kernel.aks.external-method-gate", "sep-aks", 0x0223C960, 0xD503237F, branch(0x0223C960, SELECTOR_GATE_CODE), "Broadly succeed selector 10 and preserve native dispatch for all other selectors"),
+    Patch("kernel.aks.selector35.redirect", "sep-aks", 0x0223F514, 0x5280001A, branch(0x0223F514, SELECTOR35_CODE), "Redirect selector 35 to full DER state shim"),
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
     Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
     Patch("kernel.aks.selector7.02", "sep-aks", 0x0223E7FC, 0xB900B3FF, 0xF9401288, "Load scalarInput"),
@@ -230,6 +316,45 @@ PATCHES: tuple[Patch, ...] = (
 
 BLOB_PATCHES: tuple[BlobPatch, ...] = (
     BlobPatch(
+        "kernel.aks.external-method-gate-body",
+        "sep-aks",
+        SELECTOR_GATE_CODE,
+        bytes.fromhex(
+            "fd7b01a9fd430091f30300aa008440f9600000b42024009480000035fd7b41a9"
+            "f44fc2a8ff0f5fd6"
+        ),
+        selector_gate_code(),
+        "Preserve PAC, broadly succeed selector 10, and route every other selector natively",
+    ),
+    BlobPatch(
+        "kernel.aks.selector35.full-state-code",
+        "sep-aks",
+        SELECTOR35_CODE,
+        bytes.fromhex(
+            "fc6f07a9fa6708a9f85f09a9f6570aa9f44f0ba9fd7b0ca9"
+            "fd030391fb0304aaf50303aaf60302aafc0301aaf30300aa"
+            "ff6b00b9ff3300f9599300f0280358391f79007188030054"
+        ),
+        selector35_code(),
+        "Validate output capacity and copy 157-byte selector-35 DER state",
+    ),
+    BlobPatch(
+        "kernel.aks.selector35.full-state-data",
+        "sep-aks",
+        SELECTOR35_DATA,
+        bytes.fromhex(
+            "683242391f050071e1010054700240f9f10313aa31b4f9f2"
+            "301ac1da113d80d21002118b080240f9e90310aae00313aa"
+            "010080d2f10309aa9193e1f211093fd7030000144018ffd0"
+            "00c00e91f6ef01a94818ffd0082d2091e8f300a9e00300f9"
+            "4018ffd000481f91aaf1c9971c3b00b45b3c00b4900340f9"
+            "f1031caa31b4f9f2301ac1da088e4df8e90310aae0031caa"
+            "01008052f10309aa71b6fef211"
+        ),
+        SELECTOR35_DER,
+        "Provide all 14 AppleSEPKeyStore state fields for selector 35",
+    ),
+    BlobPatch(
         "kernel.aks.selector17.der-state",
         "sep-aks",
         0x02241238,
@@ -246,17 +371,7 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-SELECTOR11_DIAGNOSTIC = Patch(
-    "kernel.aks.selector11.result-diagnostic",
-    "sep-aks-diagnostic",
-    0x0223E374,
-    0xAA0003F5,  # mov x21, x0 after the native unwrap call
-    0xD2800015,  # mov x21, #0; native error branch and cleanup remain intact
-    "Force only selector 11's final result to success; does not create a key",
-)
-
-
-def resolve(source: Path, *, diagnostic_selector11: bool = False) -> tuple[bytearray, list[dict[str, object]]]:
+def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
     data = bytearray(source.read_bytes())
     actual = sha256(data)
     if actual != KERNEL_SHA256:
@@ -266,12 +381,9 @@ def resolve(source: Path, *, diagnostic_selector11: bool = False) -> tuple[bytea
             f"    got      {actual}"
         )
 
-    selected: tuple[Patch | BlobPatch, ...] = (
-        *PATCHES, *BLOB_PATCHES, *((SELECTOR11_DIAGNOSTIC,) if diagnostic_selector11 else ()),
-    )
-    expected_count = 120 + int(diagnostic_selector11)
-    if len(selected) != expected_count:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected {expected_count}, got {len(selected)}")
+    selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
+    if len(selected) != 125:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 125, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
@@ -318,10 +430,6 @@ def main() -> None:
     parser.add_argument("output", type=Path, nargs="?", default=Path("kernelcache.patched"))
     parser.add_argument("--check", action="store_true", help="validate without writing")
     parser.add_argument(
-        "--diagnostic-selector11", action="store_true",
-        help="diagnostic only: force selector 11 status to zero without unwrapping a key",
-    )
-    parser.add_argument(
         "--records",
         type=Path,
         help="JSON record path (default: OUTPUT.records.json)",
@@ -330,7 +438,7 @@ def main() -> None:
 
     if not arguments.kernel.is_file():
         raise SystemExit(f"[!] kernel not found: {arguments.kernel}")
-    data, records = resolve(arguments.kernel, diagnostic_selector11=arguments.diagnostic_selector11)
+    data, records = resolve(arguments.kernel)
     print(f"[+] resolved {len(records)} guarded kernel patch records")
 
     if arguments.check:
