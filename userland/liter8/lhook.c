@@ -540,7 +540,8 @@ static int hookd_start_locked(void) {
 }
 
 static kern_return_t forward_to_hookd(struct xra1n_hookd_request *request,
-                                      struct xra1n_hookd_reply *reply) {
+                                      struct xra1n_hookd_reply *reply,
+                                      mach_msg_size_t reply_capacity) {
     pthread_mutex_lock(&g_hookd_lock);
     int start = hookd_start_locked();
     if (start != 0) {
@@ -560,7 +561,7 @@ static kern_return_t forward_to_hookd(struct xra1n_hookd_request *request,
     if (kr == KERN_SUCCESS) {
         reply->hdr.msgh_size = sizeof(*reply);
         kr = mach_msg(&reply->hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
-                      sizeof(*reply), reply_port, 5000, MACH_PORT_NULL);
+                      reply_capacity, reply_port, 5000, MACH_PORT_NULL);
     }
     pthread_mutex_unlock(&g_hookd_lock);
     return kr;
@@ -600,9 +601,13 @@ static int my_xpc_receive_mach_msg(void *message, void *a2, void *a3, void *a4,
                 (mach_msg_audit_trailer_t *)((uint8_t *)incoming + rounded);
             struct xra1n_hookd_request forwarded = *incoming;
             forwarded.client_pid = audit_token_pid(trailer->msgh_audit);
-            struct xra1n_hookd_reply hookd_reply = {0};
-            kern_return_t kr = forward_to_hookd(&forwarded, &hookd_reply);
-            kern_return_t status = kr == KERN_SUCCESS ? hookd_reply.status : kr;
+            struct {
+                struct xra1n_hookd_reply reply;
+                uint8_t trailer[MAX_TRAILER_SIZE];
+            } hookd_response = {0};
+            kern_return_t kr = forward_to_hookd(&forwarded, &hookd_response.reply,
+                                                sizeof(hookd_response));
+            kern_return_t status = kr == KERN_SUCCESS ? hookd_response.reply.status : kr;
             reply_to_client(incoming, status);
         }
     }

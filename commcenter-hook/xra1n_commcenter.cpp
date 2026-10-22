@@ -49,11 +49,15 @@ static kern_return_t hookd_patch(void *address, const uint8_t *data, uint32_t si
                   MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     mach_port_deallocate(mach_task_self(), launchd);
     if (kr != KERN_SUCCESS) return kr;
-    xra1n_hookd_reply reply{};
-    reply.hdr.msgh_size = sizeof(reply);
-    kr = mach_msg(&reply.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
-                  sizeof(reply), reply_port, 5000, MACH_PORT_NULL);
+    struct {
+        xra1n_hookd_reply reply;
+        uint8_t trailer[MAX_TRAILER_SIZE];
+    } response{};
+    response.reply.hdr.msgh_size = sizeof(response.reply);
+    kr = mach_msg(&response.reply.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                  sizeof(response), reply_port, 5000, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) return kr;
+    const xra1n_hookd_reply &reply = response.reply;
     if (reply.magic != XRA1N_HOOKD_MAGIC ||
         reply.action != XRA1N_HOOKD_ACTION_PATCH)
         return KERN_INVALID_VALUE;
