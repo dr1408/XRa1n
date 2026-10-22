@@ -74,13 +74,13 @@ SELECTOR35_DER = aks_full_state_der()
 
 
 def selector_gate_code() -> bytes:
-    """Succeed selectors 0..16 except 7; dispatch all others natively."""
+    """Succeed selectors 0..6 and 10; dispatch all others natively."""
     words = [
         0xD503237F,  # pacibsp; replaced at the externalMethod entry
-        0x7100403F,  # cmp w1, #16
-        conditional_branch(SELECTOR_GATE_CODE + 0x08, EXTERNAL_METHOD_NATIVE, 8),  # b.hi
-        0x71001C3F,  # cmp w1, #7 (_aks_get_lock_state)
-        conditional_branch(SELECTOR_GATE_CODE + 0x10, EXTERNAL_METHOD_NATIVE, 0),  # b.eq
+        0x7100183F,  # cmp w1, #6
+        conditional_branch(SELECTOR_GATE_CODE + 0x08, SELECTOR_GATE_CODE + 0x14, 9),  # b.ls success
+        0x7100283F,  # cmp w1, #10 (_aks_wrap_key)
+        conditional_branch(SELECTOR_GATE_CODE + 0x10, EXTERNAL_METHOD_NATIVE, 1),  # b.ne
         MOV_X0_ZERO,
         0xD50323FF,  # autibsp before the broad early return
         RET,
@@ -256,8 +256,8 @@ PATCHES: tuple[Patch, ...] = (
     # selector-specific output buffers to be populated. Selector 7 supplies
     # scalar state; selector 17 returns a short DER record; selector 35 gets
     # the complete state record. This bisection probe broadly succeeds
-    # selectors 0..16 except selector 7; higher selectors stay native.
-    Patch("kernel.aks.external-method-gate", "sep-aks", 0x0223C960, 0xD503237F, branch(0x0223C960, SELECTOR_GATE_CODE), "Broadly succeed selectors 0..16 except 7 and preserve native dispatch for higher selectors"),
+    # selectors 0..6 and selector 10; every other selector stays native.
+    Patch("kernel.aks.external-method-gate", "sep-aks", 0x0223C960, 0xD503237F, branch(0x0223C960, SELECTOR_GATE_CODE), "Broadly succeed selectors 0..6 and 10 and preserve native dispatch for all other selectors"),
     Patch("kernel.aks.selector35.redirect", "sep-aks", 0x0223F514, 0x5280001A, branch(0x0223F514, SELECTOR35_CODE), "Redirect selector 35 to full DER state shim"),
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
     Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
@@ -324,7 +324,7 @@ BLOB_PATCHES: tuple[BlobPatch, ...] = (
             "f44fc2a8ff0f5fd6"
         ),
         selector_gate_code(),
-        "Preserve PAC, broadly succeed selectors 0..16 except 7, and route every other selector natively",
+        "Preserve PAC, broadly succeed selectors 0..6 and 10, and route every other selector natively",
     ),
     BlobPatch(
         "kernel.aks.selector35.full-state-code",
