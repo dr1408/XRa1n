@@ -43,6 +43,7 @@ static const char *kSelf       = LHOOK_SELF_PATH;
 #define LHOOK_PAYLOAD_C "/var/jb/usr/lib/TweakLoader.dylib"
 #endif
 static const char *kLoader = LHOOK_PAYLOAD_C;
+static const char *kPspawn = "/var/jb/usr/lib/ellekit/pspawn.dylib";
 
 /* The rootless-icon payload (systemhook_icon.c), on the System volume for the
  * same reason as kSelf. It is inserted directly rather than loaded through
@@ -473,67 +474,6 @@ static int my_posix_spawnp(pid_t *pid, const char *path,
 DYLD_INTERPOSE(my_posix_spawn,  posix_spawn)
 DYLD_INTERPOSE(my_posix_spawnp, posix_spawnp)
 
-/* iOS 16+ xpcproxy transitions to the service through libsystem_kernel's
- * private entry points, bypassing the public posix_spawn/execve wrappers.
- * Propagate the same insert list and sandbox grants across that final exec so
- * lhook is initialized again with the real service executable path. */
-struct _posix_spawn_args_desc;
-extern int __posix_spawn(pid_t *, const char *, struct _posix_spawn_args_desc *,
-                         char *const *, char *const *);
-extern int __execve(const char *, char *const *, char *const *);
-
-static int my___posix_spawn(pid_t *pid, const char *path,
-                            struct _posix_spawn_args_desc *desc,
-                            char *const argv[], char *const envp[]) {
-    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
-    if (!inject && !env_has_our_keys(envp))
-        return __posix_spawn(pid, path, desc, argv, envp);
-
-    struct child_env child = {0};
-    if (make_child_env(envp, inject, &child) != 0) {
-        free_child_env(&child);
-        return __posix_spawn(pid, path, desc, argv, envp);
-    }
-    if (inject) trace("[lhook] private spawn injecting %s\n", path ? path : "(null)");
-    int rc = __posix_spawn(pid, path, desc, argv, child.values);
-    free_child_env(&child);
-    return rc;
-}
-
-static int my___execve(const char *path, char *const argv[], char *const envp[]) {
-    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
-    if (!inject && !env_has_our_keys(envp)) return __execve(path, argv, envp);
-
-    struct child_env child = {0};
-    if (make_child_env(envp, inject, &child) != 0) {
-        free_child_env(&child);
-        return __execve(path, argv, envp);
-    }
-    if (inject) trace("[lhook] exec injecting %s\n", path ? path : "(null)");
-    int rc = __execve(path, argv, child.values);
-    free_child_env(&child); /* reached only when exec fails */
-    return rc;
-}
-
-static int my_execve(const char *path, char *const argv[], char *const envp[]) {
-    int inject = lhook_session_enabled() && !denied(path) && any_payload_exists();
-    if (!inject && !env_has_our_keys(envp)) return execve(path, argv, envp);
-
-    struct child_env child = {0};
-    if (make_child_env(envp, inject, &child) != 0) {
-        free_child_env(&child);
-        return execve(path, argv, envp);
-    }
-    if (inject) trace("[lhook] public exec injecting %s\n", path ? path : "(null)");
-    int rc = execve(path, argv, child.values);
-    free_child_env(&child); /* reached only when exec fails */
-    return rc;
-}
-
-DYLD_INTERPOSE(my___posix_spawn, __posix_spawn)
-DYLD_INTERPOSE(my___execve, __execve)
-DYLD_INTERPOSE(my_execve, execve)
-
 /* This entry point is also used by the standalone sandbox regression test.
  * A failure leaves the host running without tweaks; it never aborts launch. */
 /* Consume one of the minted extensions. 0 if it was consumed or was never
@@ -568,12 +508,30 @@ int liter8_load_tweaks(void) {
     int enabled = lhook_session_enabled();
     commcenter_diag(enabled ? "session-enabled" : "session-disabled", NULL);
     if (!enabled) return 0;
-    /* xpcproxy keeps that process name while transitioning into some XPC
-     * services.  CommCenter is one such service on 22H374, identified by the
-     * launchd-provided XPC_SERVICE_NAME.  Treating getprogname() alone as the
-     * identity skipped TweakLoader in the final CommCenter process. */
-    if (!strcmp(getprogname(), "xpcproxy") && !is_commcenter_process()) {
-        commcenter_diag("xpcproxy-skip", NULL);
+    /* Never load TweakLoader in xpcproxy: upstream ElleKit and Dopamine both
+     * avoid that ordering.  Load ElleKit's pspawn component instead.  Unlike
+     * dyld interposition, pspawn patches the spawn implementation inline and
+     * can therefore propagate the loader across xpcproxy's private handoff to
+     * the final service executable. */
+    if (!strcmp(getprogname(), "xpcproxy")) {
+        if (!file_exists(kPspawn)) {
+            trace("[lhook] xpcproxy pspawn missing: %s\n", kPspawn);
+            return 0;
+        }
+        int exec_grant = consume_grant(1);
+        trace(exec_grant == 0
+                  ? "[lhook] xpcproxy executable grant accepted: %s\n"
+                  : "[lhook] xpcproxy executable grant refused: %s\n",
+              kPspawn);
+        dlerror();
+        void *pspawn = dlopen(kPspawn, RTLD_NOW | RTLD_GLOBAL);
+        if (!pspawn) {
+            const char *error = dlerror();
+            trace("[lhook] xpcproxy pspawn load failed: %s\n",
+                  error ? error : "unknown dlopen error");
+            return -3;
+        }
+        trace("[lhook] xpcproxy pspawn loaded: %s\n", kPspawn);
         return 0;
     }
     int is_denied = denied(getprogname());
