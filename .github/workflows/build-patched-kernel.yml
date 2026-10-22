@@ -190,6 +190,30 @@ jobs:
             --records work/output/kernel-patches.json \
             | tee work/output/kernel-patch.log
 
+          # A/B diagnostic: leave the baseline unchanged and alter only the
+          # selector-11 final status. This does not synthesize an unwrapped key.
+          python3 patch_kernel.py \
+            work/kernelcache.stock.raw \
+            work/kernelcache.sel11-diag.raw \
+            --diagnostic-selector11 \
+            --check \
+            | tee work/output/kernel-patch-sel11-check.log
+          python3 patch_kernel.py \
+            work/kernelcache.stock.raw \
+            work/kernelcache.sel11-diag.raw \
+            --diagnostic-selector11 \
+            --records work/output/kernel-patches-sel11-diag.json \
+            | tee work/output/kernel-patch-sel11.log
+          python3 - <<'PY'
+          from pathlib import Path
+          baseline = Path('work/kernelcache.patched.raw').read_bytes()
+          diagnostic = Path('work/kernelcache.sel11-diag.raw').read_bytes()
+          assert len(baseline) == len(diagnostic)
+          differences = [i for i, (a, b) in enumerate(zip(baseline, diagnostic)) if a != b]
+          assert differences == list(range(0x0223E374, 0x0223E378)), differences[:16]
+          print('selector-11 diagnostic differs from baseline at exactly one instruction')
+          PY
+
           # FirmwareArtifact preserves the original IM4P metadata and PAYP,
           # and uses Apple's iBoot-restricted Compression algorithm 0x891.
           "$LITER8_BIN" im4p repack \
@@ -204,21 +228,41 @@ jobs:
             | tee work/output/liter8-verify-extract.log
 
           cmp work/kernelcache.patched.raw work/kernelcache.patched-0x891.verify.raw
+
+          "$LITER8_BIN" im4p repack \
+            work/output/kernelcache.pristine.im4p \
+            work/kernelcache.sel11-diag.raw \
+            work/output/kernelcache.patched-0x891-sel11-diag.im4p \
+            | tee work/output/liter8-repack-sel11-diag.log
+          "$LITER8_BIN" im4p extract \
+            work/output/kernelcache.patched-0x891-sel11-diag.im4p \
+            work/kernelcache.sel11-diag.verify.raw \
+            | tee work/output/liter8-verify-sel11-diag.log
+          cmp work/kernelcache.sel11-diag.raw work/kernelcache.sel11-diag.verify.raw
           shasum -a 256 work/kernelcache.stock.raw \
             > work/output/kernelcache.stock.raw.sha256
           shasum -a 256 work/kernelcache.patched.raw \
             > work/output/kernelcache.patched.raw.sha256
+          shasum -a 256 work/kernelcache.sel11-diag.raw \
+            > work/output/kernelcache.sel11-diag.raw.sha256
           shasum -a 256 work/output/kernelcache.patched-0x891.im4p \
             > work/output/kernelcache.patched-0x891.im4p.sha256
+          shasum -a 256 work/output/kernelcache.patched-0x891-sel11-diag.im4p \
+            > work/output/kernelcache.patched-0x891-sel11-diag.im4p.sha256
           ipsw img4 im4p info --json work/output/kernelcache.patched-0x891.im4p \
             > work/output/kernelcache.patched-0x891.im4p.json
+          ipsw img4 im4p info --json work/output/kernelcache.patched-0x891-sel11-diag.im4p \
+            > work/output/kernelcache.patched-0x891-sel11-diag.im4p.json
 
           {
             echo "device=$DEVICE"
             echo "build=$BUILD"
             echo "liter8_commit=$LITER8_COMMIT"
             echo "patched_raw_round_trip=PASS"
+            echo "selector11_diagnostic_round_trip=PASS"
+            echo "selector11_diagnostic_delta=0x0223e374..0x0223e377"
             echo "patch_records=$(python3 -c 'import json; print(len(json.load(open("work/output/kernel-patches.json"))))')"
+            echo "selector11_diagnostic_records=$(python3 -c 'import json; print(len(json.load(open("work/output/kernel-patches-sel11-diag.json"))))')"
             echo "raw_bytes=$(stat -f %z work/kernelcache.patched.raw)"
             echo "pristine_im4p_sha256=$(shasum -a 256 work/output/kernelcache.pristine.im4p | awk '{print $1}')"
             echo "stock_raw_sha256=$(shasum -a 256 work/kernelcache.stock.raw | awk '{print $1}')"
