@@ -173,7 +173,11 @@ PATCHES: tuple[Patch, ...] = (
     # selector-specific output buffers to be populated, and a blanket success
     # leaves those buffers zeroed.  Selector 7 is the scalar lock-state query;
     # selector 17 returns the two-word device state {ss, sls} through the
-    # structureOutput buffer.
+    # structureOutput buffer.  The entry trampoline sends only those two
+    # selectors through the native dispatcher; every other selector retains
+    # Liter8's broad success behavior.  Its trampoline body lives in the dead
+    # body of sepPanicCheck, immediately after that function's forced return.
+    Patch("kernel.aks.external-method-gate", "sep-aks", 0x0223C960, 0xD503237F, 0x140147F2, "Dispatch selectors 7 and 17 through their shims and broadly succeed all others"),
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
     Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
     Patch("kernel.aks.selector7.02", "sep-aks", 0x0223E7FC, 0xB900B3FF, 0xF9401288, "Load scalarInput"),
@@ -231,6 +235,14 @@ PATCHES: tuple[Patch, ...] = (
 
 BLOB_PATCHES: tuple[BlobPatch, ...] = (
     BlobPatch(
+        "kernel.aks.external-method-gate-body",
+        "sep-aks",
+        0x0228E928,
+        bytes.fromhex("fd7b01a9fd430091f30300aa008440f9600000b42024009480000035fd7b41a9"),
+        bytes.fromhex("3f1c0071a00000543f44007160000054000080d2c0035fd67f2303d508b8fe17"),
+        "Route selectors 7 and 17 back through the native dispatcher; return success for all others",
+    ),
+    BlobPatch(
         "kernel.aks.selector17.der-state",
         "sep-aks",
         0x02241238,
@@ -258,8 +270,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 120:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 120, got {len(selected)}")
+    if len(selected) != 122:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 122, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
