@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <os/log.h>
+#include <mach-o/dyld.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <spawn.h>
@@ -70,6 +71,40 @@ typedef int64_t (*consume_fn)(const char *);
 
 static const char *kDebugFile  = "/var/jb/.lhook_debug";
 static const char *kLogFile    = "/var/jb/tmp/lhook.log";
+static const char *kCommCenterTweak =
+    "/var/jb/usr/lib/TweakInject/XRa1nCommCenter.dylib";
+
+/* Keep one process-specific diagnostic path outside unified logging.  Some
+ * daemon sandboxes make `log show` incomplete, which previously left us unable
+ * to distinguish "lhook was mapped" from "TweakLoader was dlopened". */
+static int is_commcenter_process(void) {
+    const char *name = getprogname();
+    if (name && strstr(name, "CommCenter")) return 1;
+    char path[1024];
+    uint32_t size = sizeof path;
+    if (_NSGetExecutablePath(path, &size) == 0) {
+        const char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        return strstr(base, "CommCenter") != NULL;
+    }
+    return 0;
+}
+
+static void commcenter_diag(const char *status, const char *detail) {
+    if (!is_commcenter_process()) return;
+    int fd = open(kLogFile, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    char line[768];
+    int length = snprintf(line, sizeof line,
+                          "[lhook] CommCenter pid=%d loader=%s%s%s\n",
+                          getpid(), status, detail ? " detail=" : "",
+                          detail ? detail : "");
+    if (length > 0) {
+        size_t count = (size_t)length < sizeof line ? (size_t)length : sizeof line - 1;
+        (void)write(fd, line, count);
+    }
+    close(fd);
+}
 
 /* The tunable denylist, on the Data volume so it can be edited over SSH. This exists
  * because the first version compiled the list into this dylib, which lives on the sealed
@@ -457,18 +492,37 @@ static int consume_grant(size_t g) {
 
 int liter8_load_tweaks(void) {
     if (getpid() == 1) return 0;
+    commcenter_diag("entry", getprogname());
     /* Read first: the checks below are themselves reads of /var/jb. Deciding
      * before consuming it cost injection in every profile that denies the
      * rootless tree until the extension lands; measured on 24B5099f,
      * iconservicesagent logged "deny(1) file-read-data /var/jb/.lhook_enabled"
      * and loaded nothing. The executable grant stays withheld until there is
      * something to dlopen, which was the point of gating at all. */
-    if (consume_grant(0) != 0) return -1;
-    if (!lhook_session_enabled() || !strcmp(getprogname(), "xpcproxy") || denied(getprogname())) return 0;
-    if (!file_exists(kLoader)) return 0;
+    int read_grant = consume_grant(0);
+    commcenter_diag(read_grant == 0 ? "read-grant-ok" : "read-grant-failed", NULL);
+    if (read_grant != 0) return -1;
+    int enabled = lhook_session_enabled();
+    commcenter_diag(enabled ? "session-enabled" : "session-disabled", NULL);
+    if (!enabled) return 0;
+    if (!strcmp(getprogname(), "xpcproxy")) {
+        commcenter_diag("xpcproxy-skip", NULL);
+        return 0;
+    }
+    int is_denied = denied(getprogname());
+    commcenter_diag(is_denied ? "policy-denied" : "policy-allowed", getprogname());
+    if (is_denied) return 0;
+    if (!file_exists(kLoader)) {
+        char error[96];
+        snprintf(error, sizeof error, "%s errno=%d", kLoader, errno);
+        commcenter_diag("loader-missing", error);
+        return 0;
+    }
+    commcenter_diag("loader-visible", kLoader);
     /* Only matters to profiles that check file-map-executable, so a refusal is
      * logged and the load continues. */
-    (void)consume_grant(1);
+    int exec_grant = consume_grant(1);
+    commcenter_diag(exec_grant == 0 ? "exec-grant-ok" : "exec-grant-failed", NULL);
     /* Loading the loader here, from the constructor, rather than inserting it.
      *
      * The fork this port comes from records the opposite, at its own lhook.c:97:
@@ -496,9 +550,30 @@ int liter8_load_tweaks(void) {
      * the extension available before dyld runs, or to defer the dlopen off the
      * constructor. The insert list is also third-party-owned, and rewriting it
      * is what the spawn path deliberately avoids. */
-    if (!dlopen(kLoader, RTLD_NOW | RTLD_GLOBAL)) {
-        os_log_error(OS_LOG_DEFAULT, "Liter8: ElleKit load failed pid=%d %{public}s", getpid(), dlerror());
+    commcenter_diag("attempt", kLoader);
+    dlerror();
+    void *loader = dlopen(kLoader, RTLD_NOW | RTLD_GLOBAL);
+    if (!loader) {
+        const char *error = dlerror();
+        commcenter_diag("failed", error ? error : "unknown dlopen error");
+        os_log_error(OS_LOG_DEFAULT, "Liter8: ElleKit load failed pid=%d %{public}s", getpid(), error);
         return -2;
+    }
+    commcenter_diag("loaded", kLoader);
+    /* ElleKit intentionally suppresses individual tweak dlopen errors.  Probe
+     * the one CommCenter-only payload explicitly so this single diagnostic
+     * build reports its complete load result rather than requiring another
+     * System-volume replacement.  dlopen is idempotent if ElleKit loaded it. */
+    if (is_commcenter_process()) {
+        dlerror();
+        void *tweak = dlopen(kCommCenterTweak, RTLD_NOW | RTLD_GLOBAL);
+        if (tweak) {
+            commcenter_diag("commcenter-tweak-loaded", kCommCenterTweak);
+        } else {
+            const char *error = dlerror();
+            commcenter_diag("commcenter-tweak-failed",
+                            error ? error : "unknown dlopen error");
+        }
     }
     os_log_error(OS_LOG_DEFAULT, "Liter8: ElleKit loaded pid=%d executable=%{public}s", getpid(), getprogname());
     return 1;
