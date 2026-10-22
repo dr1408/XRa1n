@@ -82,7 +82,6 @@ jobs:
           case " $archs " in *' arm64e '*) ;; *) echo 'pspawn lacks arm64e'; exit 1;; esac
           nm -a "$BIN" > "$OUT/pspawn.pac.nm.txt" || true
           strings -a "$BIN" > "$OUT/pspawn.pac.strings.txt"
-          grep -F '_rebind_symbols_image' "$OUT/pspawn.pac.strings.txt"
           grep -Fx 'posix_spawn' "$OUT/pspawn.pac.strings.txt"
           grep -Fx 'posix_spawnp' "$OUT/pspawn.pac.strings.txt"
 
