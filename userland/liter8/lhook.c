@@ -78,6 +78,8 @@ static const char *kCommCenterTweak =
  * daemon sandboxes make `log show` incomplete, which previously left us unable
  * to distinguish "lhook was mapped" from "TweakLoader was dlopened". */
 static int is_commcenter_process(void) {
+    const char *service = getenv("XPC_SERVICE_NAME");
+    if (service && strcmp(service, "com.apple.CommCenter") == 0) return 1;
     const char *name = getprogname();
     if (name && strstr(name, "CommCenter")) return 1;
     char path[1024];
@@ -505,7 +507,11 @@ int liter8_load_tweaks(void) {
     int enabled = lhook_session_enabled();
     commcenter_diag(enabled ? "session-enabled" : "session-disabled", NULL);
     if (!enabled) return 0;
-    if (!strcmp(getprogname(), "xpcproxy")) {
+    /* xpcproxy keeps that process name while transitioning into some XPC
+     * services.  CommCenter is one such service on 22H374, identified by the
+     * launchd-provided XPC_SERVICE_NAME.  Treating getprogname() alone as the
+     * identity skipped TweakLoader in the final CommCenter process. */
+    if (!strcmp(getprogname(), "xpcproxy") && !is_commcenter_process()) {
         commcenter_diag("xpcproxy-skip", NULL);
         return 0;
     }
