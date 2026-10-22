@@ -80,9 +80,11 @@ jobs:
           archs="$(lipo -archs "$BIN")"
           case " $archs " in *' arm64 '*) ;; *) echo 'pspawn lacks arm64'; exit 1;; esac
           case " $archs " in *' arm64e '*) ;; *) echo 'pspawn lacks arm64e'; exit 1;; esac
-          nm -gU "$BIN" | grep -q '_rebind_symbols'
-          strings -a "$BIN" | grep -Fx 'posix_spawn'
-          strings -a "$BIN" | grep -Fx 'posix_spawnp'
+          nm -gU "$BIN" > "$OUT/pspawn.pac.nm.txt"
+          strings -a "$BIN" > "$OUT/pspawn.pac.strings.txt"
+          grep -q '_rebind_symbols' "$OUT/pspawn.pac.nm.txt"
+          grep -Fx 'posix_spawn' "$OUT/pspawn.pac.strings.txt"
+          grep -Fx 'posix_spawnp' "$OUT/pspawn.pac.strings.txt"
 
           cp "$BIN" "$OUT/pspawn.pac.dylib"
           cp "$GITHUB_WORKSPACE/work/ellekit-pac.applied.patch" "$OUT/"
