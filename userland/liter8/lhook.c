@@ -5,19 +5,24 @@
  * PID 1 and xpcproxy propagate launch state but never load tweaks.
  */
 #include <dlfcn.h>
+#include <dispatch/dispatch.h>
 #include <errno.h>
 #include <stdint.h>
 #include <os/log.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <xpc/xpc.h>
 #include "lhook_session.h"
+#include "../../hookd/xra1n_hookd_protocol.h"
 
 #define DYLD_INTERPOSE(_replacement, _replacee)                                        \
     __attribute__((used)) static struct {                                              \
@@ -135,7 +140,7 @@ static const unsigned kRetryMicroseconds = 500000;
 static const char *kHardDeny[] = {
     "launchd", "amfid", "trustd", "securityd", "configd",
     "notifyd", "logd", "opendirectoryd", "keybagd", "watchdogd",
-    "dropbear", "sshd",
+    "dropbear", "sshd", "xra1n-hookd",
     NULL
 };
 
@@ -473,6 +478,138 @@ static int my_posix_spawnp(pid_t *pid, const char *path,
 
 DYLD_INTERPOSE(my_posix_spawn,  posix_spawn)
 DYLD_INTERPOSE(my_posix_spawnp, posix_spawnp)
+
+/* ---------------------------------------------------------------- hookd broker
+ * Clients send the narrow patch request to their bootstrap port (launchd).
+ * Because this image is present before launchd binds libxpc, the static
+ * interpose sees that message without modifying launchd __TEXT. PID 1 replaces
+ * the untrusted pid with the Mach audit-token pid, then forwards the request to
+ * a private hookd child. hookd itself accepts messages only from PID 1. */
+extern mach_msg_header_t *dispatch_mach_msg_get_msg(void *, size_t *);
+extern int xpc_receive_mach_msg(void *, void *, void *, void *, xpc_object_t *);
+extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t [], uint32_t);
+
+static pthread_mutex_t g_hookd_lock = PTHREAD_MUTEX_INITIALIZER;
+static pid_t g_hookd_pid = -1;
+static mach_port_t g_hookd_port = MACH_PORT_NULL;
+static const char *kHookdPath = "/var/jb/usr/libexec/xra1n-hookd";
+
+static pid_t audit_token_pid(audit_token_t token) { return (pid_t)token.val[5]; }
+
+static int hookd_start_locked(void) {
+    if (g_hookd_pid > 0 && kill(g_hookd_pid, 0) == 0 && MACH_PORT_VALID(g_hookd_port))
+        return 0;
+    if (!file_exists(kHookdPath)) return ENOENT;
+    if (MACH_PORT_VALID(g_hookd_port)) {
+        mach_port_deallocate(mach_task_self(), g_hookd_port);
+        g_hookd_port = MACH_PORT_NULL;
+    }
+    mach_port_t checkin = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &checkin);
+    if (kr != KERN_SUCCESS) return (int)kr;
+    kr = mach_port_insert_right(mach_task_self(), checkin, checkin, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        mach_port_destroy(mach_task_self(), checkin);
+        return (int)kr;
+    }
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    mach_port_t ports[] = { MACH_PORT_NULL, MACH_PORT_NULL, checkin };
+    int result = posix_spawnattr_set_registered_ports_np(&attr, ports, 3);
+    if (result == 0) {
+        char *const argv[] = { (char *)kHookdPath, NULL };
+        char *const envp[] = { "_SafeMode=1", NULL };
+        result = posix_spawn(&g_hookd_pid, kHookdPath, NULL, &attr, argv, envp);
+    }
+    posix_spawnattr_destroy(&attr);
+    if (result != 0) {
+        mach_port_destroy(mach_task_self(), checkin);
+        return result;
+    }
+    uint8_t buffer[sizeof(mach_msg_header_t) + MAX_TRAILER_SIZE] = {0};
+    mach_msg_header_t *header = (mach_msg_header_t *)buffer;
+    kr = mach_msg(header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(buffer),
+                  checkin, 5000, MACH_PORT_NULL);
+    mach_port_destroy(mach_task_self(), checkin);
+    if (kr != KERN_SUCCESS || !MACH_PORT_VALID(header->msgh_remote_port))
+        return kr == KERN_SUCCESS ? EPROTO : (int)kr;
+    g_hookd_port = header->msgh_remote_port;
+    mach_port_mod_refs(mach_task_self(), g_hookd_port, MACH_PORT_RIGHT_SEND, 1);
+    mach_msg_destroy(header);
+    return 0;
+}
+
+static kern_return_t forward_to_hookd(struct xra1n_hookd_request *request,
+                                      struct xra1n_hookd_reply *reply) {
+    pthread_mutex_lock(&g_hookd_lock);
+    int start = hookd_start_locked();
+    if (start != 0) {
+        pthread_mutex_unlock(&g_hookd_lock);
+        return start;
+    }
+    mach_port_t reply_port = mig_get_reply_port();
+    request->hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+                                             MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    request->hdr.msgh_remote_port = g_hookd_port;
+    request->hdr.msgh_local_port = reply_port;
+    request->hdr.msgh_voucher_port = MACH_PORT_NULL;
+    request->hdr.msgh_id = XRA1N_HOOKD_MSG_ID;
+    kern_return_t kr = mach_msg(&request->hdr, MACH_SEND_MSG,
+                                request->hdr.msgh_size, 0, MACH_PORT_NULL,
+                                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr == KERN_SUCCESS) {
+        reply->hdr.msgh_size = sizeof(*reply);
+        kr = mach_msg(&reply->hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                      sizeof(*reply), reply_port, 5000, MACH_PORT_NULL);
+    }
+    pthread_mutex_unlock(&g_hookd_lock);
+    return kr;
+}
+
+static void reply_to_client(struct xra1n_hookd_request *original,
+                            kern_return_t status) {
+    struct xra1n_hookd_reply reply = {0};
+    mach_msg_type_name_t bits = MACH_MSGH_BITS_REMOTE(original->hdr.msgh_bits);
+    if (bits == MACH_MSG_TYPE_COPY_SEND) bits = MACH_MSG_TYPE_MOVE_SEND;
+    reply.hdr.msgh_bits = MACH_MSGH_BITS(bits, 0);
+    reply.hdr.msgh_size = sizeof(reply);
+    reply.hdr.msgh_remote_port = original->hdr.msgh_remote_port;
+    reply.hdr.msgh_id = original->hdr.msgh_id + 100;
+    reply.magic = XRA1N_HOOKD_MAGIC;
+    reply.action = XRA1N_HOOKD_ACTION_PATCH;
+    reply.status = status;
+    if (mach_msg_send(&reply.hdr) == KERN_SUCCESS) {
+        original->hdr.msgh_remote_port = MACH_PORT_NULL;
+        original->hdr.msgh_bits &= ~MACH_MSGH_BITS_REMOTE_MASK;
+    }
+}
+
+static int my_xpc_receive_mach_msg(void *message, void *a2, void *a3, void *a4,
+                                   xpc_object_t *out) {
+    size_t capacity = 0;
+    struct xra1n_hookd_request *incoming =
+        (struct xra1n_hookd_request *)dispatch_mach_msg_get_msg(message, &capacity);
+    if (getpid() == 1 && incoming && capacity >= sizeof(*incoming) &&
+        incoming->hdr.msgh_size == sizeof(*incoming) &&
+        incoming->magic == XRA1N_HOOKD_MAGIC &&
+        incoming->action == XRA1N_HOOKD_ACTION_PATCH &&
+        incoming->data_size > 0 && incoming->data_size <= XRA1N_HOOKD_MAX_DATA) {
+        size_t rounded = (incoming->hdr.msgh_size + 3u) & ~3u;
+        if (capacity >= rounded + sizeof(mach_msg_audit_trailer_t)) {
+            mach_msg_audit_trailer_t *trailer =
+                (mach_msg_audit_trailer_t *)((uint8_t *)incoming + rounded);
+            struct xra1n_hookd_request forwarded = *incoming;
+            forwarded.client_pid = audit_token_pid(trailer->msgh_audit);
+            struct xra1n_hookd_reply hookd_reply = {0};
+            kern_return_t kr = forward_to_hookd(&forwarded, &hookd_reply);
+            kern_return_t status = kr == KERN_SUCCESS ? hookd_reply.status : kr;
+            reply_to_client(incoming, status);
+        }
+    }
+    return xpc_receive_mach_msg(message, a2, a3, a4, out);
+}
+
+DYLD_INTERPOSE(my_xpc_receive_mach_msg, xpc_receive_mach_msg)
 
 /* This entry point is also used by the standalone sandbox regression test.
  * A failure leaves the host running without tweaks; it never aborts launch. */

@@ -2,21 +2,64 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <syslog.h>
 #include <unistd.h>
-
-using mshook_memory_t = void (*)(void *, const uint8_t *, uint64_t);
-static mshook_memory_t g_hook_memory;
+#include "../hookd/xra1n_hookd_protocol.h"
 
 static std::atomic<bool> g_patched{false};
 static const char kLogPath[] = "/var/jb/tmp/xra1n-commcenter-hook.log";
 static constexpr uintptr_t kImageBase = 0x22A89D000ULL;
 static constexpr uintptr_t kFamilyIntersection = 0x22A8BCB1CULL;
 static constexpr uintptr_t kFamilyIntersectionOffset = kFamilyIntersection - kImageBase;
+
+static kern_return_t hookd_patch(void *address, const uint8_t *data, uint32_t size)
+{
+    if (address == nullptr || data == nullptr || size == 0 ||
+        size > XRA1N_HOOKD_MAX_DATA)
+        return KERN_INVALID_ARGUMENT;
+    mach_port_t launchd = MACH_PORT_NULL;
+    kern_return_t kr = task_get_bootstrap_port(mach_task_self(), &launchd);
+    if (kr != KERN_SUCCESS || !MACH_PORT_VALID(launchd))
+        return kr == KERN_SUCCESS ? KERN_FAILURE : kr;
+    mach_port_t reply_port = mig_get_reply_port();
+    if (!MACH_PORT_VALID(reply_port)) {
+        mach_port_deallocate(mach_task_self(), launchd);
+        return KERN_FAILURE;
+    }
+    xra1n_hookd_request request{};
+    request.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+                                            MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    request.hdr.msgh_size = sizeof(request);
+    request.hdr.msgh_remote_port = launchd;
+    request.hdr.msgh_local_port = reply_port;
+    request.hdr.msgh_id = XRA1N_HOOKD_MSG_ID;
+    request.magic = XRA1N_HOOKD_MAGIC;
+    request.action = XRA1N_HOOKD_ACTION_PATCH;
+    request.data_size = size;
+    request.address = reinterpret_cast<mach_vm_address_t>(address);
+    memcpy(request.data, data, size);
+    kr = mach_msg(&request.hdr, MACH_SEND_MSG, request.hdr.msgh_size, 0,
+                  MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    mach_port_deallocate(mach_task_self(), launchd);
+    if (kr != KERN_SUCCESS) return kr;
+    xra1n_hookd_reply reply{};
+    reply.hdr.msgh_size = sizeof(reply);
+    kr = mach_msg(&reply.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                  sizeof(reply), reply_port, 5000, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) return kr;
+    if (reply.magic != XRA1N_HOOKD_MAGIC ||
+        reply.action != XRA1N_HOOKD_ACTION_PATCH)
+        return KERN_INVALID_VALUE;
+    if (reply.status == KERN_SUCCESS) sys_icache_invalidate(address, size);
+    return reply.status;
+}
 
 static void marker(const char *line)
 {
@@ -51,11 +94,14 @@ static void image_added(const mach_header *image, intptr_t)
         marker("XRA1N_COMMCENTER family patch preimage mismatch\n");
         return;
     }
-    if (g_hook_memory == nullptr) {
-        marker("XRA1N_COMMCENTER MSHookMemory unavailable\n");
+    kern_return_t kr = hookd_patch(site, replacement, sizeof(replacement));
+    if (kr != KERN_SUCCESS) {
+        char line[96];
+        snprintf(line, sizeof(line),
+                 "XRA1N_COMMCENTER hookd patch failed kr=%d\n", kr);
+        marker(line);
         return;
     }
-    g_hook_memory(site, replacement, sizeof(replacement));
     if (memcmp(site, replacement, sizeof(replacement)) == 0)
         marker("XRA1N_COMMCENTER family translation AND -> ORR active\n");
     else
@@ -65,9 +111,6 @@ static void image_added(const mach_header *image, intptr_t)
 __attribute__((constructor)) static void init(void)
 {
     marker("XRA1N_COMMCENTER hook loaded\n");
-    void *ellekit = dlopen("/var/jb/usr/lib/libellekit.dylib", RTLD_NOW | RTLD_GLOBAL);
-    if (ellekit != nullptr)
-        g_hook_memory = reinterpret_cast<mshook_memory_t>(dlsym(ellekit, "MSHookMemory"));
     _dyld_register_func_for_add_image(image_added);
     marker("XRA1N_COMMCENTER waiting for KCommandDrivers\n");
 }

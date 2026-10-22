@@ -210,6 +210,7 @@ jobs:
           strings -a "$OUT/lhook" | grep -Fx 'LITER8_SANDBOX_READ_TOKEN='
           strings -a "$OUT/lhook" | grep -Fx 'LITER8_SANDBOX_EXEC_TOKEN='
           strings -a "$OUT/lhook" | grep -Fx 'xpcproxy'
+          strings -a "$OUT/lhook" | grep -Fx '/var/jb/usr/libexec/xra1n-hookd'
           strings -a "$OUT/lhookctl" | grep -Fx 'kern.bootsessionuuid'
 
       - name: Verify artifact
