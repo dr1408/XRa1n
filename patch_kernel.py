@@ -173,11 +173,13 @@ PATCHES: tuple[Patch, ...] = (
     # selector-specific output buffers to be populated, and a blanket success
     # leaves those buffers zeroed.  Selector 7 is the scalar lock-state query;
     # selector 17 returns the two-word device state {ss, sls} through the
-    # structureOutput buffer.  The entry trampoline sends only those two
-    # selectors through the native dispatcher; every other selector retains
-    # Liter8's broad success behavior.  Its trampoline body lives in the dead
-    # body of sepPanicCheck, immediately after that function's forced return.
-    Patch("kernel.aks.external-method-gate", "sep-aks", 0x0223C960, 0xD503237F, 0x140147F2, "Dispatch selectors 7 and 17 through their shims and broadly succeed all others"),
+    # structureOutput buffer.  Selector 35 shares selector 17's native body,
+    # but requests a different state mode; intercept only selector 35 with an
+    # empty success so it cannot consume selector 17's synthetic DER.  Every
+    # other selector keeps its native implementation.  The trampoline body
+    # lives in the dead body of sepPanicCheck, immediately after that
+    # function's forced return.
+    Patch("kernel.aks.external-method-gate", "sep-aks", 0x0223C960, 0xD503237F, 0x140147F2, "Return empty success only for selector 35 and preserve native dispatch for all others"),
     Patch("kernel.aks.start-sep-call", "sep-aks", 0x0223BC20, 0x97FFD850, NOP, "Skip the SEP-dependent AKS start call"),
     Patch("kernel.aks.selector7.01", "sep-aks", 0x0223E7F8, 0xF90063FF, 0xB40001F4, "Validate selector-7 argument object"),
     Patch("kernel.aks.selector7.02", "sep-aks", 0x0223E7FC, 0xB900B3FF, 0xF9401288, "Load scalarInput"),
@@ -239,8 +241,8 @@ BLOB_PATCHES: tuple[BlobPatch, ...] = (
         "sep-aks",
         0x0228E928,
         bytes.fromhex("fd7b01a9fd430091f30300aa008440f9600000b42024009480000035fd7b41a9"),
-        bytes.fromhex("3f1c0071a00000543f44007160000054000080d2c0035fd67f2303d508b8fe17"),
-        "Route selectors 7 and 17 back through the native dispatcher; return success for all others",
+        bytes.fromhex("3f8c007161000054000080d2c0035fd67f2303d50ab8fe171f2003d51f2003d5"),
+        "Return empty success for selector 35; route every other selector through the native dispatcher",
     ),
     BlobPatch(
         "kernel.aks.selector17.der-state",
