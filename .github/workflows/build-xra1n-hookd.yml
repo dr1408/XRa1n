@@ -52,6 +52,26 @@ jobs:
           codesign --verify --strict "$OUT/xra1n-hookd.noent-probe"
           test -z "$(ldid -e "$OUT/xra1n-hookd.noent-probe")"
 
+          for spec in tfp debugger both; do
+            ent="$OUT/$spec.plist"
+            python3 - "$spec" "$ent" <<'PY'
+          import plistlib, sys
+          spec, path = sys.argv[1:]
+          keys = {
+              'tfp': ['task_for_pid-allow'],
+              'debugger': ['com.apple.private.cs.debugger'],
+              'both': ['task_for_pid-allow', 'com.apple.private.cs.debugger'],
+          }[spec]
+          with open(path, 'wb') as stream:
+              plistlib.dump({key: True for key in keys}, stream)
+          PY
+            probe="$OUT/xra1n-hookd.$spec-probe"
+            cp "$OUT/xra1n-hookd.arm64" "$probe"
+            codesign --force --sign - --timestamp=none \
+              --entitlements "$ent" -i "com.xra1n.hookd.$spec" "$probe"
+            codesign --verify --strict "$probe"
+          done
+
       - name: Verify artifact
         shell: bash
         run: |
@@ -71,7 +91,7 @@ jobs:
               if actual != expected:
                   raise SystemExit(f'entitlement mismatch for {arch}')
           PY
-          shasum -a 256 "$BIN" "$OUT/xra1n-hookd.noent-probe" | tee "$OUT/SHA256SUMS"
+          shasum -a 256 "$BIN" "$OUT"/xra1n-hookd.*-probe | tee "$OUT/SHA256SUMS"
 
       - name: Upload hookd
         uses: actions/upload-artifact@v4
@@ -80,6 +100,9 @@ jobs:
           path: |
             work/xra1n-hookd/xra1n-hookd
             work/xra1n-hookd/xra1n-hookd.noent-probe
+            work/xra1n-hookd/xra1n-hookd.tfp-probe
+            work/xra1n-hookd/xra1n-hookd.debugger-probe
+            work/xra1n-hookd/xra1n-hookd.both-probe
             work/xra1n-hookd/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
