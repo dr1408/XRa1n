@@ -125,6 +125,15 @@ static const int kMarkerPathCount = 3;
 static const int kMaxAttempts = 120;
 static const unsigned kRetryMicroseconds = 500000;
 
+/* xpcproxy does not exec CommCenter on 22H374.  It maps the service into the
+ * existing process after our constructor has already run, so neither
+ * getprogname(), XPC_SERVICE_NAME nor _NSGetExecutablePath identify
+ * CommCenter at constructor time.  Keep this retry deliberately narrow and
+ * bounded: it exists only in an injected xpcproxy, stops as soon as the
+ * process identifies as CommCenter, and otherwise dies after 30 seconds. */
+static const int kCommCenterMaxAttempts = 120;
+static const unsigned kCommCenterRetryMicroseconds = 250000;
+
 /* Compiled in and NOT overridable. Injecting any of these does not produce a crashed
  * process, it produces a device that does not come back, or one that cannot be reached
  * to fix it. dropbear and sshd are here for that second reason: they are the only way in.
@@ -585,10 +594,37 @@ int liter8_load_tweaks(void) {
     return 1;
 }
 
+/* CommCenter's xpcproxy-to-service transition happens after constructors.
+ * Calling the normal entry point here preserves all existing session, policy,
+ * sandbox-extension and loader checks; this thread changes timing only. */
+static void *commcenter_deferred_loader(void *unused) {
+    (void)unused;
+    for (int attempt = 0; attempt < kCommCenterMaxAttempts; attempt++) {
+        if (is_commcenter_process()) {
+            commcenter_diag("deferred-transition", getprogname());
+            (void)liter8_load_tweaks();
+            return NULL;
+        }
+        usleep(kCommCenterRetryMicroseconds);
+    }
+    return NULL;
+}
+
+static void start_commcenter_deferred_loader(void) {
+    pthread_t thread;
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) return;
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    (void)pthread_create(&thread, &attr, commcenter_deferred_loader, NULL);
+    pthread_attr_destroy(&attr);
+}
+
 #ifndef LHOOK_NO_CONSTRUCTOR
 __attribute__((constructor))
 static void lhook_init(void) {
     (void)liter8_load_tweaks();
+    if (getpid() != 1 && !strcmp(getprogname(), "xpcproxy"))
+        start_commcenter_deferred_loader();
     char message[64];
     int length = build_message(message, (int)sizeof(message));
     if (file_exists(kDebugFile)) write_console(message, length);
