@@ -168,7 +168,9 @@ jobs:
 
           daemons/: four guarded patched, entitlement-preserving ad-hoc signed daemons.
                     usermanagerd keeps the diagnostics DeviceTree while enabling
-                    native early-boot reconciliation and normal persona loading.
+                    normal loading of an already-provisioned persona. Its native
+                    early-boot initializer remains diagnostics-gated because
+                    forcing it selected a fresh User-volume environment.
           launchd: guarded weak /usr/lib/lhook dependency; stock CodeDirectory
                    code-slot hashes repaired without replacing special slots.
           hook/: Liter8-derived universal arm64+arm64e signed hook payloads.

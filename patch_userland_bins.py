@@ -148,13 +148,6 @@ PATCHES = {
                 NOP,
                 "Run normal session/persona loading in diagnostics mode",
             ),
-            Patch(
-                "usermanagerd.init.diagnostics-gate",
-                0x514EC,
-                0x34000100,
-                0x14000008,
-                "Enter native early-boot reconciliation in diagnostics mode",
-            ),
         ],
     ),
 }
@@ -261,7 +254,7 @@ def main() -> None:
 
     resolved: dict[str, tuple[Path, bytearray, list[dict[str, object]]]] = {}
     # Resolve and validate the complete plan first.  Nothing is written unless
-    # all four pristine binaries and all ten instruction guards match.
+    # all four pristine binaries and all nine instruction guards match.
     for name in PATCHES:
         source = arguments.source / name
         if not source.is_file():
