@@ -1625,9 +1625,25 @@ returns `noPin | beenUnlocked` (`0x6`):
      The workflow now signs both PhotoForce binaries with `ldid -S -Cadhoc`,
      without task-port entitlements. The XR kernel patcher redirects the
      terminal denial branch of AMFI's get-task policy to its existing success
-     cleanup (`0x020834B0`, stock `0x17FFFFF1`). This is a guarded, untested
-     hypothesis; a normal boot must confirm the probe reaches `main` and whether
-     `task_for_pid` succeeds before calling wallpaper repair fixed.
+     cleanup (`0x020834B0`, stock `0x17FFFFF1`). Liter8-iPad8's TASKAC2 analysis
+     identified another, separate XNU rejection in `task_conversion_eval_internal`:
+     an inline Developer Mode byte check, not the exported accessor. For XR
+     22H374, IDA confirms the corresponding compare at VA `0xFFFFFFF007E622D8`
+     (file offset `0x00E5E2D8`, stock word `0xEB01001F`). The guarded patch changes
+     only that compare to `CMP XZR,XZR` (`0xEB1F03FF`), taking its existing
+     zero-result edge while preserving prior task validation and later
+     platform/corpse checks. It is now in `patch_kernel.py`, but remains
+     hardware-unverified. Do not call wallpaper repair fixed until `task_for_pid`
+     returns a live port and the probe successfully reads/writes the intended
+     PosterBoard state.
+   - The remaining XR task-access path is now ported as guarded records as well:
+     Seatbelt `mpc_ops[97]`, `[98]`, and `[157]` resolve to file offsets
+     `0x02E62740`, `0x02E625C8`, and `0x02E5C494`. Each keeps a `BTI C` landing
+     pad and returns errno zero. The later caller-versus-victim comparison at
+     `0x00E5E30C` is changed from `CMP X0,X1` to `CMP XZR,XZR`, taking the
+     existing self path before the platform-asymmetry rejection. The exact iPad
+     resolver expects two conversion sites; XR has only this one reviewed
+     semantic equivalent, so no second offset was fabricated.
    - Acceptance: watcher remains alive, its log records ensure exit 0, the
      default wallpaper appears, and creating/selecting a wallpaper survives a
      PosterBoard restart.

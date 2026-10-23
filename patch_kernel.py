@@ -185,6 +185,41 @@ def sandbox_stub(name: str, offset: int, second: int) -> tuple[Patch, Patch]:
     )
 
 
+def task_sandbox_stub(
+    name: str,
+    offset: int,
+    second: int,
+    third: int,
+) -> tuple[Patch, Patch, Patch]:
+    """Build a BTI-compatible errno-zero stub for an mpc_ops callback."""
+    return (
+        Patch(
+            f"kernel.task-access.{name}.bti",
+            "task-access",
+            offset,
+            0xD503237F,
+            0xD503245F,
+            f"Preserve an indirect-call landing pad for Seatbelt {name}",
+        ),
+        Patch(
+            f"kernel.task-access.{name}.result",
+            "task-access",
+            offset + 4,
+            second,
+            MOV_W0_ZERO,
+            f"Return errno zero from Seatbelt {name}",
+        ),
+        Patch(
+            f"kernel.task-access.{name}.return",
+            "task-access",
+            offset + 8,
+            third,
+            RET,
+            f"Return from the forced Seatbelt {name} success path",
+        ),
+    )
+
+
 PATCHES: tuple[Patch, ...] = (
     # Public Liter8 Sandbox compatibility set.  Change only the low target word
     # of mpc_ops[258]; the authenticated-pointer metadata word is preserved.
@@ -312,6 +347,44 @@ PATCHES: tuple[Patch, ...] = (
         "Allow the terminal AMFI task-port policy path via its native success cleanup",
     ),
 
+    # Seatbelt task-port policy callbacks, resolved directly from the XR
+    # 22H374 Sandbox mac_policy_ops table. Slots 97/98 are the flavor-aware
+    # expose/get checks and slot 157 is proc_check_debug. These callbacks are
+    # indirect branch targets, so retain a BTI C landing pad rather than using
+    # the older two-word filesystem-hook stub above.
+    *task_sandbox_stub("sandbox-expose-task", 0x02E62740, 0xD10783FF, 0xA91C6FFC),
+    *task_sandbox_stub("sandbox-get-task", 0x02E625C8, 0xD107C3FF, 0xA91C6FFC),
+    *task_sandbox_stub("sandbox-debug", 0x02E5C494, 0xD107C3FF, 0xA91C6FFC),
+
+    # XNU's task_conversion_eval_internal has an inline Developer Mode byte
+    # check that is independent of the exported developer_mode_state accessor
+    # patched above. On XR 22H374, IDA shows the compare at VA
+    # 0xFFFFFFF007E622D8 followed by B.EQ to the existing zero-result path.
+    # This is the early out-trans control-port gate: changing only the compare
+    # to CMP XZR,XZR takes that existing success edge while retaining the
+    # preceding task_require/null checks and the later platform/corpse checks.
+    # Exact stock word verified in IDA and the hash-locked 22H374 kernel.
+    Patch(
+        "kernel.task-access.control-out-trans",
+        "task-access",
+        0x00E5E2D8,
+        0xEB01001F,
+        0xEB1F03FF,
+        "Take task_conversion_eval_internal's existing success edge for control out-trans",
+    ),
+    # Once the early out-trans gate succeeds, a foreign platform target still
+    # reaches this caller-versus-victim comparison. Forcing its existing self
+    # edge avoids the subsequent platform asymmetry rejection while preserving
+    # the preceding object validation and all port-conversion mechanics.
+    Patch(
+        "kernel.task-access.conversion.0",
+        "task-access",
+        0x00E5E30C,
+        0xEB01001F,
+        0xEB1F03FF,
+        "Take task_conversion_eval_internal's caller-equals-victim path",
+    ),
+
     Patch("kernel.debugger.result", "debugger", 0x015B50C8, 0x90FFA4E8, 0xD2800020, "Force PE_i_can_has_debugger true"),
     Patch("kernel.debugger.return", "debugger", 0x015B50CC, 0xB40000E0, RET, "Return debugger permission"),
     Patch("kernel.ppl.loaded-trust-cache", "ppl", 0x015F7FF0, 0x1A9F17E0, 0x52800020, "Force PPL loaded trust-cache result true"),
@@ -408,8 +481,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 130:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 130, got {len(selected)}")
+    if len(selected) != 141:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 141, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
