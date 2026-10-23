@@ -23,7 +23,7 @@
  * not is the original install error.
  *
  * The fork this comes from reports an AltStore Marketplace install succeeding
- * on iPadOS 23H30 with this tweak, l8localauth and a disk eligibility edit
+ * on iPadOS 23H30 with this tweak and a disk eligibility edit
  * together. None of that combination is verified on iPhone 11.
  *
  * Scope and safety:
@@ -151,7 +151,7 @@ static NSString *string_property(id object, const char *name) {
  * half of that condition is permanently true. Rejections are logged, so a build
  * that changes these values shows up as lost fallbacks rather than silence. */
 /* A method's type encoding with the frame offsets stripped, leaving the type
- * letters the casts actually depend on. Same helper as l8localauth. */
+ * letters the casts actually depend on. */
 static void encoding_letters(const char *encoding, char *out, size_t size) {
     size_t n = 0;
     for (const char *p = encoding; p != NULL && *p != '\0' && n + 1 < size; p++) {
@@ -181,7 +181,7 @@ static BOOL l8_resolve(id self, SEL sel, NSError **error) {
      * before the marker was read changed the original invocation on every call,
      * armed or not, so a caller that passed NULL had the original run as though
      * it had asked for an error. The kill switch is supposed to leave no trace;
-     * the l8localauth wrappers do the same thing for the same reason.
+     * disabled operation must preserve the caller's original error-pointer ABI.
      *
      * Armed is not a licence to substitute either: `error ? &native : NULL`
      * below keeps the caller's NULL on the paths that end up returning the
@@ -261,7 +261,7 @@ static void install_if_ready(void) {
         os_log_error(OS_LOG_DEFAULT, "l8persona: resolvePersonaWithError: not found (pid %d)", getpid());
         return;
     }
-    /* Types, not just arity, the same guard l8localauth applies. This is a
+    /* Types, not just arity, are validated before replacing the implementation. This is a
      * private selector, and one that kept three arguments while changing its
      * return or out-parameter ABI would be called through ResolveIMP anyway,
      * corrupting ordinary installd calls rather than just disabling the
@@ -281,7 +281,7 @@ static void install_if_ready(void) {
 }
 
 /* Pure header parsing: the objc image-load callback holds the runtime lock,
- * so it must not call into objc (see l8localauth). */
+ * so it must not call into objc. */
 static BOOL is_library_image(const struct mach_header *header) {
     if (header == NULL || header->magic != MH_MAGIC_64) return NO;
     const struct load_command *command =

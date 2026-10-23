@@ -518,12 +518,7 @@ adds Dropbear, jbboot and DDI, and mitigates watchdogd); a separately patched
 `/sbin/launchd` weak-loads `/usr/lib/lhook` for PID-1 spawn interposition.
 Upstream provisions injection **disarmed for first boot** and enables it later
 using session-bound `lhookctl`; therefore a missing lhook is not by itself a
-proven explanation for XR's initial Hello/passcode box. Upstream's newer
-`l8localauth` is an ElleKit tweak loaded through TweakLoader/lhook, with a
-separate root-owned marker, translating only exact SEP-less ACM -3 / LA -1000
-errors; it does not repair the observed `passd` null dereference. Its selector
-encodings and other guards are build-specific and must be validated for
-22H374 before any XR deployment.
+proven explanation for XR's initial Hello/passcode box.
 
 Next work must not depend on live crash capture: this XR boot has no working
 normal-mode USB/SSH path, and an on-screen prompt need not generate a crash
@@ -541,17 +536,14 @@ only into `coreauthd` and pads a short `LACDTORatchetSEPStateParser` input to
 so this is not a copy-and-install fix. Upstream `l8pair` is a marker-gated
 lockdownd keychain/Trust fallback, while `l8remotepairing` repairs
 RemoteXPC's no-keybag state and narrow pairing items. Those target host USB
-pairing **after** normal boot, not the first-run Setup pane directly. The
-latest `l8localauth` needs the hook/TweakLoader path and a separate marker;
-it must not be conflated with the narrower `l8pair_auth` Trust policy 1028
-guard. No local pristine XR `lockdownd` or `remotepairingdeviced` binary has
-yet been collected for an exact-build structural port.
+pairing **after** normal boot, not the first-run Setup pane directly. No local
+pristine XR `lockdownd` or `remotepairingdeviced` binary has yet been collected
+for an exact-build structural port.
 
 Isolation note: the existing `IMG_20261019_184210.jpg` shows a full-screen
 `Enter Passcode` UI with a lock glyph, alphanumeric keyboard, and **Emergency**
-button. This is not the small LAContext confirmation sheet described by
-upstream's `l8localauth` commit. Do not assume that tweak addresses this
-screen. The already-collected crash archive contains repeated `passd` reports
+button. This is not a small LAContext confirmation sheet. The already-collected
+crash archive contains repeated `passd` reports
 but no Setup or SpringBoard crash reports. The ScreenTime `disabled.plist`
 change left the visible symptom unchanged, lowering that hypothesis.
 High-yield reversible A/B test: on the next SSHRD session, temporarily
@@ -1598,12 +1590,14 @@ returns `noPin | beenUnlocked` (`0x6`):
   Settings pairing between two iPhones, so that result was an unsupported
   target test rather than an AKS, Keychain or `bluetoothd` failure.  Do not add
   a Bluetooth hook for it.
-- **App Store downloads:** Apple-ID sign-in succeeds, but tapping **Get** does
-  not complete an install. The abandoned daemon-patching experiment is removed.
-  The active plan is the narrow, marker-gated `l8persona` install-path fallback
-  described below; do not reintroduce a patched system persona daemon.
+- **App Store downloads: resolved.** With `l8persona` armed, respawning
+  `installd` and `installcoordinationd` loads the tweak and installs complete
+  after the native Apple-account password flow. The flow can be slow. The
+  broad LocalAuthentication translation was tested and removed because it
+  suppressed that password flow. Do not reintroduce it or a patched system
+  persona daemon.
 
-#### Three focused Liter8 compatibility fixes
+#### Two focused Liter8 compatibility fixes
 
 1. **`l8persona.dylib` — App Store/install persona fallback**
    - Inject only into `installd` and `installcoordinationd`.
@@ -1626,27 +1620,17 @@ returns `noPin | beenUnlocked` (`0x6`):
    - Liter8's original resolver assumed `object == once + 8`; 22H374 reverses
      those globals. The repository resolver now accepts either adjacent order
      while still requiring one unique pair. The local matcher passes.
+   - First deployment result: both executables were killed with signal 9 when
+     signed using plain `codesign -`. The workflow now matches Liter8 exactly
+     with `ldid -S... -Cadhoc`; rebuild and redeploy before repeating acceptance.
    - Acceptance: watcher remains alive, its log records ensure exit 0, the
      default wallpaper appears, and creating/selecting a wallpaper survives a
      PosterBoard restart.
 
-3. **`l8localauth.dylib` — SEP-less confirmation translation**
-   - Inject through the Foundation filter, but install hooks only after
-     `LAContext` appears and only with exact method encodings.
-   - Translate only `com.apple.LocalAuthentication` code `-1000` whose debug
-     description parses as `ACM verification ... failed: -3` into
-     `LAErrorPasscodeNotSet`; all other results pass through unchanged.
-   - Local 22H374 validation found all six selectors and all six expected ABIs,
-     so the expected runtime hook mask is `0x3f`.
-   - Acceptance: capture the original failure signature first, then arm the
-     secure `/var/jb/.liter8-localauth` marker and verify the intended action
-     follows its native no-passcode branch. This does not create SEP-backed
-     authentication or repair unrelated install/account failures.
-
-The three fixes are built by `XR Runtime Fixes` with an iOS 18 deployment target.
-The artifact contains two universal tweak dylibs and their filter plists plus
-the universal PhotoForce probe/watcher. Keep each marker independently
-reversible and test one fix at a time before enabling all three.
+The two fixes are built by `XR Runtime Fixes` with an iOS 18 deployment target.
+The artifact contains the universal persona tweak and filter plist plus the
+universal PhotoForce probe/watcher. Keep the persona marker reversible and test
+PhotoForce independently.
 
 #### Camera
 

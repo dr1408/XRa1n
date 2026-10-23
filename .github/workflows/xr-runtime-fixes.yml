@@ -104,8 +104,8 @@ jobs:
           CLANG="$(xcrun --sdk iphoneos --find clang)"
           OUT=work/xr-runtime-fixes
 
-          # Two ElleKit/TweakLoader payloads. They resolve private classes at
-          # runtime and intentionally link only Foundation.
+          # ElleKit/TweakLoader persona payload. It resolves private classes at
+          # runtime and intentionally links only Foundation.
           for arch in arm64 arm64e; do
             TARGET="${arch}-apple-ios18.0"
             "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
@@ -114,13 +114,6 @@ jobs:
               -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8persona.dylib \
               -framework Foundation xr-runtime-fixes/l8persona.m \
               -o "$OUT/l8persona.${arch}.dylib"
-            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
-              -fblocks -fvisibility=hidden -fno-common -Wall -Wextra \
-              -dynamiclib -Wl,-not_for_dyld_shared_cache \
-              -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8localauth.dylib \
-              -framework Foundation xr-runtime-fixes/l8localauth.m \
-              -o "$OUT/l8localauth.${arch}.dylib"
-
             # PhotoForce is not an injected dylib. The privileged probe edits
             # PosterBoard's cached PosterFoundation dictionary, and pfwatch
             # reapplies it to each new PosterBoard process.
@@ -134,7 +127,7 @@ jobs:
               -o "$OUT/pfwatch.${arch}"
           done
 
-          for name in l8persona l8localauth; do
+          for name in l8persona; do
             lipo -create "$OUT/${name}.arm64.dylib" "$OUT/${name}.arm64e.dylib" \
               -output "$OUT/${name}.dylib"
             codesign --force --sign - --timestamp=none "$OUT/${name}.dylib"
@@ -143,8 +136,10 @@ jobs:
           for name in pfruntimeprobe pfwatch; do
             lipo -create "$OUT/${name}.arm64" "$OUT/${name}.arm64e" \
               -output "$OUT/${name}"
-            codesign --force --sign - --timestamp=none \
-              --entitlements xr-runtime-fixes/pfruntimeprobe.ent "$OUT/${name}"
+            # Match Liter8 exactly. These privileged executables need an
+            # ad-hoc CodeDirectory carrying the task-port entitlements; plain
+            # `codesign -` was killed by AMFI at exec time on 22H374.
+            ldid -Sxr-runtime-fixes/pfruntimeprobe.ent -Cadhoc "$OUT/${name}"
           done
           rm -f "$OUT"/*.arm64 "$OUT"/*.arm64e \
                 "$OUT"/*.arm64.dylib "$OUT"/*.arm64e.dylib
@@ -181,22 +176,16 @@ jobs:
             | grep -F 'policy 1028 measured LA failure'
           strings -a work/xr-runtime-fixes/xra1n-coreauth.dylib \
             | grep -F 'ratchetStateFromState:'
-          for DYLIB in work/xr-runtime-fixes/l8persona.dylib \
-                       work/xr-runtime-fixes/l8localauth.dylib; do
+          for DYLIB in work/xr-runtime-fixes/l8persona.dylib; do
             test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
             codesign --verify --strict "$DYLIB"
             test -z "$(ldid -e "$DYLIB")"
           done
           ! otool -L work/xr-runtime-fixes/l8persona.dylib \
             | grep -q InstalledContentLibrary
-          ! otool -L work/xr-runtime-fixes/l8localauth.dylib \
-            | grep -q LocalAuthentication
           strings -a work/xr-runtime-fixes/l8persona.dylib \
             | grep -Fx 'CONTAINER_PERSONA_PRIMARY'
-          strings -a work/xr-runtime-fixes/l8localauth.dylib \
-            | grep -F 'ACM verification'
-          plutil -lint work/xr-runtime-fixes/l8persona.plist \
-            work/xr-runtime-fixes/l8localauth.plist
+          plutil -lint work/xr-runtime-fixes/l8persona.plist
           for BIN in work/xr-runtime-fixes/pfruntimeprobe \
                      work/xr-runtime-fixes/pfwatch; do
             test "$(lipo -archs "$BIN")" = "arm64 arm64e"
@@ -226,8 +215,6 @@ jobs:
             work/xr-runtime-fixes/xra1n-coreauth.dylib
             work/xr-runtime-fixes/l8persona.dylib
             work/xr-runtime-fixes/l8persona.plist
-            work/xr-runtime-fixes/l8localauth.dylib
-            work/xr-runtime-fixes/l8localauth.plist
             work/xr-runtime-fixes/pfruntimeprobe
             work/xr-runtime-fixes/pfwatch
             work/xr-runtime-fixes/SHA256SUMS
