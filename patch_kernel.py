@@ -302,6 +302,18 @@ PATCHES: tuple[Patch, ...] = (
     Patch("kernel.debugger.return", "debugger", 0x015B50CC, 0xB40000E0, RET, "Return debugger permission"),
     Patch("kernel.ppl.loaded-trust-cache", "ppl", 0x015F7FF0, 0x1A9F17E0, 0x52800020, "Force PPL loaded trust-cache result true"),
 
+    # Runtime code-modification support, reintroduced as a standalone kernel
+    # capability rather than as part of the reverted CommCenter experiment.
+    # XR 22H374 stores the PPL allow-invalid byte separately at pmap + 0xc2,
+    # so only that byte store changes and the pmap reference count is untouched.
+    Patch("kernel.codesign.ppl-allow-invalid", "codesign-runtime", 0x01604D6C, 0x39030A7F, 0x39030A68, "Initialise every pmap with its PPL allow-invalid byte set"),
+    # Rewritten executable pages take vm_fault_enter's existing cs_bypass path.
+    Patch("kernel.codesign.vm-fault-cs-bypass", "codesign-runtime", 0x00F05EDC, 0x361800D6, NOP, "Always take the vm_fault_enter code-signing bypass path"),
+    # Preserve execute permission across RW->RX/RWX transitions and bypass the
+    # map bit-9 rejection. Both unconditional branches keep the stock targets.
+    Patch("kernel.codesign.vm-map-protect.keep-execute", "codesign-runtime", 0x00F1C214, 0x54000141, 0x1400000A, "Always skip vm_map_protect's execute downgrade"),
+    Patch("kernel.codesign.vm-map-protect.bit9", "codesign-runtime", 0x00F1C254, 0x364FFBA8, 0x17FFFFDD, "Always take vm_map_protect's permitted bit-9 path"),
+
     Patch("kernel.panic.root-snapshot", "panic", 0x02F200E0, 0x37280CC8, NOP, "Bypass root snapshot panic guard"),
     Patch("kernel.panic.broken-root-seal", "panic", 0x02E85C18, 0x37700160, NOP, "Bypass broken root seal panic guard"),
     Patch("kernel.panic.root-vnode-auth", "panic", 0x0129F744, 0x35001340, NOP, "Bypass root-vnode authentication panic guard"),
@@ -382,8 +394,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 125:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 125, got {len(selected)}")
+    if len(selected) != 129:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 129, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
