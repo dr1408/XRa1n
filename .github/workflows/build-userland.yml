@@ -36,7 +36,7 @@ jobs:
           python3 patch_userland_bins.py work/source --check
           python3 patch_launchd_weakload.py work/source/launchd
 
-      - name: Patch and sign three XR daemons
+      - name: Patch and sign four XR daemons
         shell: bash
         run: |
           set -euo pipefail
@@ -47,14 +47,14 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          for name in ('coreauthd', 'mobileactivationd', 'ctkd'):
+          for name in ('coreauthd', 'mobileactivationd', 'ctkd', 'usermanagerd'):
               before = subprocess.check_output(['ldid', '-e', f'work/source/{name}'])
               after = subprocess.check_output(['ldid', '-e', f'work/output/daemons/{name}'])
               if plistlib.loads(before) != plistlib.loads(after):
                   raise SystemExit(f'{name}: entitlements changed')
               print(f'[+] {name}: ad-hoc signature and entitlements verified')
           PY
-          python3 verify_userland_signature.py work/output/daemons/{coreauthd,mobileactivationd,ctkd}
+          python3 verify_userland_signature.py work/output/daemons/{coreauthd,mobileactivationd,ctkd,usermanagerd}
 
       - name: Patch and sign XR Setup executable like Liter8
         shell: bash
@@ -166,7 +166,9 @@ jobs:
           cat > work/output/README.txt <<'EOF'
           XRa1n / iPhone11,8 / iOS 18.7.10 (22H374) userland build
 
-          daemons/: three guarded patched, entitlement-preserving ad-hoc signed daemons.
+          daemons/: four guarded patched, entitlement-preserving ad-hoc signed daemons.
+                    usermanagerd keeps the diagnostics DeviceTree while enabling
+                    native early-boot reconciliation and normal persona loading.
           launchd: guarded weak /usr/lib/lhook dependency; stock CodeDirectory
                    code-slot hashes repaired without replacing special slots.
           hook/: Liter8-derived universal arm64+arm64e signed hook payloads.

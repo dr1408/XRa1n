@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch the three Liter8 post-restore userland daemons for XR 22H374.
+"""Patch the four post-restore userland daemons for XR 22H374.
 
 This is the small, dependency-free XRa1n counterpart of Liter8's
 CoreAuthDResolver, MobileActivationDResolver and CTKDResolver.  It is locked to
@@ -7,7 +7,7 @@ the pristine binaries collected for iPhone11,8 / iOS 18.7.10 and checks both
 the complete input digest and every instruction pre-image before writing.
 
 The source directory must contain:
-  coreauthd, mobileactivationd, ctkd
+  coreauthd, mobileactivationd, ctkd, usermanagerd
 
 By default patched copies and JSON patch records are written to ``patched/``;
 the pristine inputs are never modified.  Use --check to validate only.
@@ -138,6 +138,25 @@ PATCHES = {
             ),
         ],
     ),
+    "usermanagerd": (
+        "4dd3412ac0f6619af541077ab8f14fb78da6d9b5c8713b6f88f231aaa7c05e69",
+        [
+            Patch(
+                "usermanagerd.normal.diagnostics-gate",
+                0x51408,
+                0x370000C0,
+                NOP,
+                "Run normal session/persona loading in diagnostics mode",
+            ),
+            Patch(
+                "usermanagerd.init.diagnostics-gate",
+                0x514EC,
+                0x34000100,
+                0x14000008,
+                "Enter native early-boot reconciliation in diagnostics mode",
+            ),
+        ],
+    ),
 }
 
 
@@ -145,6 +164,7 @@ SIGNING_IDENTIFIERS = {
     "coreauthd": "com.apple.coreauthd",
     "mobileactivationd": "com.apple.mobileactivationd",
     "ctkd": "com.apple.ctkd",
+    "usermanagerd": "com.apple.usermanagerd",
 }
 
 
@@ -223,7 +243,7 @@ def sign_with_ldid(ldid: Path, pristine: Path, patched: Path, name: str) -> None
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("source", type=Path, help="directory containing the three pristine binaries")
+    parser.add_argument("source", type=Path, help="directory containing the four pristine binaries")
     parser.add_argument("output", type=Path, nargs="?", default=Path("patched"))
     parser.add_argument("--check", action="store_true", help="validate all inputs without writing")
     parser.add_argument("--ldid", type=Path, help="preserve entitlements and ad-hoc sign each output")
@@ -241,7 +261,7 @@ def main() -> None:
 
     resolved: dict[str, tuple[Path, bytearray, list[dict[str, object]]]] = {}
     # Resolve and validate the complete plan first.  Nothing is written unless
-    # all three pristine binaries and all eight instruction guards match.
+    # all four pristine binaries and all ten instruction guards match.
     for name in PATCHES:
         source = arguments.source / name
         if not source.is_file():
@@ -251,7 +271,7 @@ def main() -> None:
         print(f"[+] {name}: resolved {len(records)} guarded patch(es)")
 
     if arguments.check:
-        print("[+] complete three-daemon patch plan validated; no files written")
+        print("[+] complete four-daemon patch plan validated; no files written")
         return
 
     arguments.output.mkdir(parents=True, exist_ok=True)
