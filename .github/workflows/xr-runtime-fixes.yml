@@ -125,9 +125,6 @@ jobs:
               -fblocks -Wall -Wextra -framework Foundation \
               xr-runtime-fixes/pfwatch.m \
               -o "$OUT/pfwatch.${arch}"
-            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
-              -Wall -Wextra -Werror xr-runtime-fixes/admission_probe.c \
-              -o "$OUT/admission-probe.${arch}"
           done
 
           for name in l8persona; do
@@ -144,23 +141,6 @@ jobs:
             # `codesign -` was killed by AMFI at exec time on 22H374.
             ldid -Sxr-runtime-fixes/pfruntimeprobe.ent -Cadhoc "$OUT/${name}"
           done
-
-          # Same minimal executable, varied only by signer/entitlements. This
-          # identifies which admission policy kills pfruntimeprobe before main.
-          lipo -create "$OUT/admission-probe.arm64" "$OUT/admission-probe.arm64e" \
-            -output "$OUT/admission-base"
-          cp "$OUT/admission-base" "$OUT/admission-codesign"
-          codesign --force --sign - --timestamp=none "$OUT/admission-codesign"
-          cp "$OUT/admission-base" "$OUT/admission-ldid-none"
-          ldid -S -Cadhoc "$OUT/admission-ldid-none"
-          for variant in platform tfp system-task; do
-            cp "$OUT/admission-base" "$OUT/admission-${variant}"
-            ldid -S"xr-runtime-fixes/admission-${variant}.ent" -Cadhoc \
-              "$OUT/admission-${variant}"
-          done
-          cp "$OUT/admission-base" "$OUT/admission-full"
-          ldid -Sxr-runtime-fixes/pfruntimeprobe.ent -Cadhoc "$OUT/admission-full"
-          rm -f "$OUT/admission-base"
           rm -f "$OUT"/*.arm64 "$OUT"/*.arm64e \
                 "$OUT"/*.arm64.dylib "$OUT"/*.arm64e.dylib
 
@@ -217,18 +197,12 @@ jobs:
             | grep -Fx 'PFPosterPathURLResourceValues'
           strings -a work/xr-runtime-fixes/pfwatch \
             | grep -Fx '/Applications/PosterBoard.app/PosterBoard'
-          for BIN in work/xr-runtime-fixes/admission-*; do
-            test "$(lipo -archs "$BIN")" = "arm64 arm64e"
-            codesign --verify --strict "$BIN"
-            strings -a "$BIN" | grep -Fx 'ADMISSION_PROBE_MAIN_OK'
-          done
           file "$DYLIB"
           shasum -a 256 \
             work/xr-runtime-fixes/*.dylib \
             work/xr-runtime-fixes/*.plist \
             work/xr-runtime-fixes/pfruntimeprobe \
             work/xr-runtime-fixes/pfwatch \
-            work/xr-runtime-fixes/admission-* \
             | tee work/xr-runtime-fixes/SHA256SUMS
 
       - name: Upload XR runtime fixes
@@ -243,7 +217,6 @@ jobs:
             work/xr-runtime-fixes/l8persona.plist
             work/xr-runtime-fixes/pfruntimeprobe
             work/xr-runtime-fixes/pfwatch
-            work/xr-runtime-fixes/admission-*
             work/xr-runtime-fixes/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
