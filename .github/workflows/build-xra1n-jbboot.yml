@@ -252,6 +252,8 @@ jobs:
           strings -a "$BIN" | grep -Fx '/var/jb/usr/bin/uicache'
           strings -a "$BIN" | grep -Fx '/var/jb/.xra1n-system-apps-registered'
           strings -a "$BIN" | grep -Fx 'xra1n-jbboot: system app registration complete'
+          strings -a "$BIN" | grep -Fx '/usr/local/bin/pfwatch'
+          strings -a "$BIN" | grep -Fx 'xra1n-jbboot: entering pfwatch'
           shasum -a 256 "$BIN" | tee "$OUT/SHA256SUMS"
           cat "$OUT/Sileo.app.tar.gz.sha256" >> "$OUT/SHA256SUMS"
           for file in lhook lhookctl lhook.deny \

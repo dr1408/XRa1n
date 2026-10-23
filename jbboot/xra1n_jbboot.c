@@ -39,6 +39,7 @@
 #define SILEO_PERSONA_ID 99
 #define UICACHE_PATH "/var/jb/usr/bin/uicache"
 #define APP_REGISTRATION_MARKER "/var/jb/.xra1n-system-apps-registered"
+#define PFWATCH_PATH "/usr/local/bin/pfwatch"
 
 extern char **environ;
 
@@ -423,5 +424,20 @@ int main(void)
     if (!register_system_apps_once()) {
         return 6;
     }
-    return 0;
+
+    /* Match Liter8's launch lifecycle: after the one-time boot preparation,
+     * replace this process with the native PosterBoard watcher.  exec keeps
+     * the watcher in the same launchd job instead of leaving an unsupervised
+     * child behind. */
+    if (access(PFWATCH_PATH, X_OK) != 0) {
+        fprintf(stderr, "xra1n-jbboot: pfwatch unavailable at %s: %s\n",
+                PFWATCH_PATH, strerror(errno));
+        return 0;
+    }
+    puts("xra1n-jbboot: entering pfwatch");
+    fflush(NULL);
+    execl(PFWATCH_PATH, "pfwatch", (char *)NULL);
+    fprintf(stderr, "xra1n-jbboot: exec pfwatch failed: %s\n",
+            strerror(errno));
+    return 7;
 }

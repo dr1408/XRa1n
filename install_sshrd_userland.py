@@ -60,6 +60,7 @@ JBBOOT_JOB = {
     "Label": "com.xra1n.jbboot",
     "ProgramArguments": ["/usr/local/bin/xra1n-jbboot"],
     "RunAtLoad": True,
+    "KeepAlive": {"SuccessfulExit": False},
     "POSIXSpawnType": "Interactive",
     "EnablePressuredExit": False,
     "EnableTransactions": False,

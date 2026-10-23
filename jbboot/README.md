@@ -19,4 +19,9 @@ The same process issues a `com.apple.app-sandbox.read` extension for
 indexed. The token is recreated on every boot because `/private/var/tmp` is
 ephemeral.
 
+After completing the one-time setup, it replaces itself with the native
+`/usr/local/bin/pfwatch` process.  This keeps PosterBoard repair under the same
+launchd job, matching Liter8's `exec pfwatch` lifecycle without adding a second
+`com.jbboot` service or an intermediate wrapper script.
+
 It is an executable, not a dylib, and contains no injection or interposition.
