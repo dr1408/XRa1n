@@ -7,6 +7,7 @@
 #import <Foundation/Foundation.h>
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <mach/mach.h>
 #include <malloc/malloc.h>
 #include <objc/runtime.h>
@@ -15,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern kern_return_t mach_vm_read_overwrite(vm_map_t, mach_vm_address_t, mach_vm_size_t,
                                              mach_vm_address_t, mach_vm_size_t *);
@@ -25,6 +27,20 @@ static const char *kPFPath =
     "/System/Library/PrivateFrameworks/PosterFoundation.framework/PosterFoundation";
 
 typedef NSDictionary *(*PFValuesFn)(void);
+
+// Survives SIGKILL and deliberately avoids Foundation, stdio buffering and
+// allocation so the first missing line identifies the failing operation.
+static const char *kDiagnosticLog = "/private/var/tmp/pfruntimeprobe.diag.log";
+
+static void checkpoint(const char *message) {
+    int fd = open(kDiagnosticLog, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    size_t length = strlen(message);
+    (void)write(fd, message, length);
+    (void)write(fd, "\n", 1);
+    (void)fsync(fd);
+    (void)close(fd);
+}
 
 // Resolve PosterFoundation's two globals from the live function instead of
 // carrying unslid addresses from one dyld shared cache. The function first
@@ -167,6 +183,7 @@ static int run_local_mutation_selftest(void) {
 
 static int apply_remote_mutation(task_t task, mach_vm_address_t object,
                                  const uint64_t words[8]) {
+    checkpoint("13 enter apply_remote_mutation");
     const uint64_t expected[7] = {
         0x0400000000000002ULL,
         (uintptr_t)NSURLFileProtectionKey,
@@ -187,15 +204,21 @@ static int apply_remote_mutation(task_t task, mach_vm_address_t object,
         0,
     };
 
+    checkpoint("14 before task_suspend");
     kern_return_t kr = task_suspend(task);
+    checkpoint("15 after task_suspend");
     printf("task_suspend -> %d (%s)\n", kr, mach_error_string(kr));
     if (kr != KERN_SUCCESS) return 1;
 
+    checkpoint("16 before mach_vm_write");
     kr = mach_vm_write(task, object + 0x8, (vm_offset_t)replacement,
                        (mach_msg_type_number_t)sizeof(replacement));
+    checkpoint("17 after mach_vm_write");
     printf("mach_vm_write 24-byte contract -> %d (%s)\n", kr, mach_error_string(kr));
 
+    checkpoint("18 before task_resume");
     kern_return_t resume_kr = task_resume(task);
+    checkpoint("19 after task_resume");
     printf("task_resume -> %d (%s)\n", resume_kr, mach_error_string(resume_kr));
     if (resume_kr != KERN_SUCCESS) {
         resume_kr = task_resume(task);
@@ -219,7 +242,11 @@ static int apply_remote_mutation(task_t task, mach_vm_address_t object,
 }
 
 int main(int argc, char **argv) {
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+    checkpoint("01 entered main");
     @autoreleasepool {
+        checkpoint("02 entered autoreleasepool");
         if (argc < 2 || argc > 3) {
             fprintf(stderr, "usage: %s <PosterBoard-pid> [--local-selftest|--apply|--ensure]\n", argv[0]);
             return 2;
@@ -231,19 +258,25 @@ int main(int argc, char **argv) {
             return 2;
         }
 
+        checkpoint("03 before dlopen PosterFoundation");
         void *handle = dlopen(kPFPath, RTLD_NOW | RTLD_LOCAL);
+        checkpoint("04 after dlopen PosterFoundation");
         if (!handle) {
             fprintf(stderr, "dlopen PosterFoundation: %s\n", dlerror());
             return 1;
         }
 
+        checkpoint("05 before dlsym PFPosterPathURLResourceValues");
         PFValuesFn values_fn = (PFValuesFn)dlsym(handle, "PFPosterPathURLResourceValues");
+        checkpoint("06 after dlsym PFPosterPathURLResourceValues");
         if (!values_fn) {
             fprintf(stderr, "dlsym PFPosterPathURLResourceValues: %s\n", dlerror());
             return 1;
         }
 
+        checkpoint("07 before local PFPosterPathURLResourceValues call");
         NSDictionary *local_values = values_fn(); // complete dispatch_once before reading
+        checkpoint("08 after local PFPosterPathURLResourceValues call");
         uintptr_t live_fn = (uintptr_t)ptrauth_strip((void *)values_fn,
                                                      ptrauth_key_function_pointer);
         uintptr_t once_address = 0;
@@ -276,13 +309,17 @@ int main(int argc, char **argv) {
         }
 
         task_t task = MACH_PORT_NULL;
+        checkpoint("09 before task_for_pid");
         kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+        checkpoint("10 after task_for_pid");
         printf("task_for_pid -> %d (%s), port=0x%x\n", kr, mach_error_string(kr), task);
         if (kr != KERN_SUCCESS || task == MACH_PORT_NULL || task == MACH_PORT_DEAD) return 1;
 
         uint64_t remote_once = 0;
         uint64_t remote_object = 0;
+        checkpoint("11 before first mach_vm_read_overwrite");
         kr = read_remote(task, once_address, &remote_once, sizeof(remote_once));
+        checkpoint("12 after first mach_vm_read_overwrite");
         printf("read once -> %d (%s), value=0x%016llx\n",
                kr, mach_error_string(kr), remote_once);
         if (kr != KERN_SUCCESS) return 1;
