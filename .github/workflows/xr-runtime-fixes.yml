@@ -1,0 +1,235 @@
+name: XR Runtime Fixes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xr-runtime-fixes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout XRa1n
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install signing tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ldid-procursus
+          command -v ldid
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build pairing and coreauth dylibs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/xr-runtime-fixes
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos --find clang)"
+          SOURCE=xr-runtime-fixes/l8pair_probe.c
+          INSTALL_NAME=/usr/lib/l8pair-probe.dylib
+
+          for arch in arm64 arm64e; do
+            "$CLANG" \
+              -target "${arch}-apple-ios18.0" \
+              -isysroot "$SDK" \
+              -Os -fvisibility=hidden -fno-common \
+              -Wall -Wextra -Werror \
+              -dynamiclib \
+              -Wl,-install_name,"$INSTALL_NAME" \
+              -Wl,-not_for_dyld_shared_cache \
+              "$SOURCE" \
+              -o "work/xr-runtime-fixes/l8pair-probe.${arch}.dylib"
+            # Sign each thin image with Apple's signer before lipo.  The
+            # Procursus ldid build available on this runner did not emit a
+            # CodeDirectory that macOS codesign recognized for these dylibs.
+            codesign --force --sign - --timestamp=none \
+              "work/xr-runtime-fixes/l8pair-probe.${arch}.dylib"
+            codesign --verify --strict \
+              "work/xr-runtime-fixes/l8pair-probe.${arch}.dylib"
+          done
+
+          lipo -create \
+            work/xr-runtime-fixes/l8pair-probe.arm64.dylib \
+            work/xr-runtime-fixes/l8pair-probe.arm64e.dylib \
+            -output work/xr-runtime-fixes/l8pair-probe.dylib
+
+          for arch in arm64 arm64e; do
+            TARGET="${arch}-apple-ios18.0"
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
+              -fblocks -dynamiclib -Wl,-install_name,/usr/lib/xra1n-pair.dylib \
+              -Wl,-not_for_dyld_shared_cache \
+              -framework CoreFoundation -framework Foundation -framework Security \
+              xr-runtime-fixes/xra1n_pair.c xr-runtime-fixes/xra1n_pair_auth.m \
+              -o "work/xr-runtime-fixes/xra1n-pair.${arch}.dylib"
+            codesign --force --sign - --timestamp=none \
+              "work/xr-runtime-fixes/xra1n-pair.${arch}.dylib"
+            codesign --verify --strict \
+              "work/xr-runtime-fixes/xra1n-pair.${arch}.dylib"
+
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
+              -fblocks -dynamiclib -Wl,-install_name,/usr/lib/xra1n-coreauth.dylib \
+              -Wl,-not_for_dyld_shared_cache -framework Foundation \
+              xr-runtime-fixes/xra1n_coreauth.m \
+              -o "work/xr-runtime-fixes/xra1n-coreauth.${arch}.dylib"
+            codesign --force --sign - --timestamp=none \
+              "work/xr-runtime-fixes/xra1n-coreauth.${arch}.dylib"
+            codesign --verify --strict \
+              "work/xr-runtime-fixes/xra1n-coreauth.${arch}.dylib"
+          done
+
+          for name in xra1n-pair xra1n-coreauth; do
+            lipo -create \
+              "work/xr-runtime-fixes/${name}.arm64.dylib" \
+              "work/xr-runtime-fixes/${name}.arm64e.dylib" \
+              -output "work/xr-runtime-fixes/${name}.dylib"
+          done
+
+      - name: Build reviewed Liter8 compatibility fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos --find clang)"
+          OUT=work/xr-runtime-fixes
+
+          # Two ElleKit/TweakLoader payloads. They resolve private classes at
+          # runtime and intentionally link only Foundation.
+          for arch in arm64 arm64e; do
+            TARGET="${arch}-apple-ios18.0"
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fblocks -fvisibility=hidden -fno-common -Wall -Wextra \
+              -dynamiclib -Wl,-not_for_dyld_shared_cache \
+              -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8persona.dylib \
+              -framework Foundation xr-runtime-fixes/l8persona.m \
+              -o "$OUT/l8persona.${arch}.dylib"
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fblocks -fvisibility=hidden -fno-common -Wall -Wextra \
+              -dynamiclib -Wl,-not_for_dyld_shared_cache \
+              -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8localauth.dylib \
+              -framework Foundation xr-runtime-fixes/l8localauth.m \
+              -o "$OUT/l8localauth.${arch}.dylib"
+
+            # PhotoForce is not an injected dylib. The privileged probe edits
+            # PosterBoard's cached PosterFoundation dictionary, and pfwatch
+            # reapplies it to each new PosterBoard process.
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fblocks -Wall -Wextra -framework Foundation \
+              xr-runtime-fixes/pfruntimeprobe.m \
+              -o "$OUT/pfruntimeprobe.${arch}"
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fblocks -Wall -Wextra -framework Foundation \
+              xr-runtime-fixes/pfwatch.m \
+              -o "$OUT/pfwatch.${arch}"
+          done
+
+          for name in l8persona l8localauth; do
+            lipo -create "$OUT/${name}.arm64.dylib" "$OUT/${name}.arm64e.dylib" \
+              -output "$OUT/${name}.dylib"
+            codesign --force --sign - --timestamp=none "$OUT/${name}.dylib"
+            cp "xr-runtime-fixes/${name}.plist" "$OUT/${name}.plist"
+          done
+          for name in pfruntimeprobe pfwatch; do
+            lipo -create "$OUT/${name}.arm64" "$OUT/${name}.arm64e" \
+              -output "$OUT/${name}"
+            codesign --force --sign - --timestamp=none \
+              --entitlements xr-runtime-fixes/pfruntimeprobe.ent "$OUT/${name}"
+          done
+          rm -f "$OUT"/*.arm64 "$OUT"/*.arm64e \
+                "$OUT"/*.arm64.dylib "$OUT"/*.arm64e.dylib
+
+      - name: Verify artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB=work/xr-runtime-fixes/l8pair-probe.dylib
+          test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
+          otool -D "$DYLIB" | grep -Fx '/usr/lib/l8pair-probe.dylib'
+          strings -a "$DYLIB" | grep -Fx 'XRA1N_L8PAIR_PROBE loaded pid=%d executable=%s'
+          strings -a "$DYLIB" | grep -Fx '/private/var/root/Library/Lockdown/xra1n-l8pair-probe.log'
+          test -z "$(ldid -e "$DYLIB")"
+          codesign --verify --strict "$DYLIB"
+          for DYLIB in work/xr-runtime-fixes/xra1n-pair.dylib \
+                       work/xr-runtime-fixes/xra1n-coreauth.dylib; do
+            test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
+            codesign --verify --strict "$DYLIB"
+            test -z "$(ldid -e "$DYLIB")"
+          done
+          otool -D work/xr-runtime-fixes/xra1n-pair.dylib \
+            | grep -Fx '/usr/lib/xra1n-pair.dylib'
+          otool -D work/xr-runtime-fixes/xra1n-coreauth.dylib \
+            | grep -Fx '/usr/lib/xra1n-coreauth.dylib'
+          for arch in arm64 arm64e; do
+            size=$(otool -arch "$arch" -l work/xr-runtime-fixes/xra1n-pair.dylib \
+              | awk '/sectname __interpose/{found=1} found && /size/{print $2; exit}')
+            test "$size" = 0x0000000000000030
+          done
+          strings -a work/xr-runtime-fixes/xra1n-pair.dylib \
+            | grep -Fx '/private/var/root/Library/Lockdown/.xra1n-pairing-fallback'
+          strings -a work/xr-runtime-fixes/xra1n-pair.dylib \
+            | grep -F 'policy 1028 measured LA failure'
+          strings -a work/xr-runtime-fixes/xra1n-coreauth.dylib \
+            | grep -F 'ratchetStateFromState:'
+          for DYLIB in work/xr-runtime-fixes/l8persona.dylib \
+                       work/xr-runtime-fixes/l8localauth.dylib; do
+            test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
+            codesign --verify --strict "$DYLIB"
+            test -z "$(ldid -e "$DYLIB")"
+          done
+          ! otool -L work/xr-runtime-fixes/l8persona.dylib \
+            | grep -q InstalledContentLibrary
+          ! otool -L work/xr-runtime-fixes/l8localauth.dylib \
+            | grep -q LocalAuthentication
+          strings -a work/xr-runtime-fixes/l8persona.dylib \
+            | grep -Fx 'CONTAINER_PERSONA_PRIMARY'
+          strings -a work/xr-runtime-fixes/l8localauth.dylib \
+            | grep -F 'ACM verification'
+          plutil -lint work/xr-runtime-fixes/l8persona.plist \
+            work/xr-runtime-fixes/l8localauth.plist
+          for BIN in work/xr-runtime-fixes/pfruntimeprobe \
+                     work/xr-runtime-fixes/pfwatch; do
+            test "$(lipo -archs "$BIN")" = "arm64 arm64e"
+            codesign --verify --strict "$BIN"
+            ldid -e "$BIN" | grep -q 'com.apple.system-task-ports'
+            ldid -e "$BIN" | grep -q 'task_for_pid-allow'
+          done
+          strings -a work/xr-runtime-fixes/pfruntimeprobe \
+            | grep -Fx 'PFPosterPathURLResourceValues'
+          strings -a work/xr-runtime-fixes/pfwatch \
+            | grep -Fx '/Applications/PosterBoard.app/PosterBoard'
+          file "$DYLIB"
+          shasum -a 256 \
+            work/xr-runtime-fixes/*.dylib \
+            work/xr-runtime-fixes/*.plist \
+            work/xr-runtime-fixes/pfruntimeprobe \
+            work/xr-runtime-fixes/pfwatch \
+            | tee work/xr-runtime-fixes/SHA256SUMS
+
+      - name: Upload XR runtime fixes
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr-runtime-fixes-${{ github.sha }}
+          path: |
+            work/xr-runtime-fixes/l8pair-probe.dylib
+            work/xr-runtime-fixes/xra1n-pair.dylib
+            work/xr-runtime-fixes/xra1n-coreauth.dylib
+            work/xr-runtime-fixes/l8persona.dylib
+            work/xr-runtime-fixes/l8persona.plist
+            work/xr-runtime-fixes/l8localauth.dylib
+            work/xr-runtime-fixes/l8localauth.plist
+            work/xr-runtime-fixes/pfruntimeprobe
+            work/xr-runtime-fixes/pfwatch
+            work/xr-runtime-fixes/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

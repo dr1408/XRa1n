@@ -10,7 +10,6 @@ EXPECTED = {
     "coreauthd": "d479cb7f9de2531e85c5af0edd7d91ed9f4a29fea7e192565f7754f1440b22d7",
     "mobileactivationd": "17076de71a65e1096c74ee87ee6d4460748f2dfc7ffb9760ba4cf8439bfbb26e",
     "ctkd": "97c328e8a85248c0b3b0471a92aa0f13bebdc8a7730f1a43014dbeaf214e8657",
-    "usermanagerd": "4dd3412ac0f6619af541077ab8f14fb78da6d9b5c8713b6f88f231aaa7c05e69",
     "launchd": "e2323c09df447b6d57bc3d9132be82f7186af167a656921212ca9880e29dea06",
 }
 

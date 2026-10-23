@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  ElleKit/Substrate filter. Foundation is in every Objective-C process,
+	  so this reaches apps and daemons alike (Settings, the marketplace's
+	  AppDistributionLaunchAngel, lockdownd). l8localauth does not link
+	  LocalAuthentication: it hooks LAContext when the host loads the
+	  framework, so processes that never use it do not pay for it.
+	-->
+	<key>Filter</key>
+	<dict>
+		<key>Bundles</key>
+		<array>
+			<string>com.apple.Foundation</string>
+		</array>
+	</dict>
+</dict>
+</plist>

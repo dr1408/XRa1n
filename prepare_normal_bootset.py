@@ -104,12 +104,14 @@ def make_sources(items: dict) -> None:
     verify = parse(dt_patched.read_bytes())
     if resolve_path(verify, "/defaults").find_prop("content-protect"):
         raise RuntimeError("DeviceTree content-protect removal failed")
-    for node, prop in (("/chosen", "ephemeral-storage"),):
-        entry = resolve_path(verify, node).find_prop(prop)
-        if entry is None or entry.value != struct.pack("<I", 1):
-            raise RuntimeError(f"DeviceTree normal property wrong: {node}/{prop}")
     if resolve_path(verify, "/defaults").find_prop("no-effaceable-storage"):
-        raise RuntimeError("DeviceTree test must not contain /defaults/no-effaceable-storage")
+        raise RuntimeError("stable DeviceTree must not contain /defaults/no-effaceable-storage")
+    ephemeral = resolve_path(verify, "/chosen").find_prop("ephemeral-storage")
+    if ephemeral is not None and any(ephemeral.value):
+        raise RuntimeError("DeviceTree must not enable /chosen/ephemeral-storage")
+    diagnostics = resolve_path(verify, "/product").find_prop("boot-ios-diagnostics")
+    if diagnostics is None or diagnostics.value != struct.pack("<I", 1):
+        raise RuntimeError("stable DeviceTree must enable /product/boot-ios-diagnostics")
     (SOURCES / "DeviceTree.patch.log").write_text("\n".join(results) + "\n")
     print(f"[+] normal sources ready: {SOURCES}")
 

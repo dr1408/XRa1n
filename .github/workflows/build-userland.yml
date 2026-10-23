@@ -36,7 +36,7 @@ jobs:
           python3 patch_userland_bins.py work/source --check
           python3 patch_launchd_weakload.py work/source/launchd
 
-      - name: Patch and sign four XR daemons
+      - name: Patch and sign three XR daemons
         shell: bash
         run: |
           set -euo pipefail
@@ -47,14 +47,14 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          for name in ('coreauthd', 'mobileactivationd', 'ctkd', 'usermanagerd'):
+          for name in ('coreauthd', 'mobileactivationd', 'ctkd'):
               before = subprocess.check_output(['ldid', '-e', f'work/source/{name}'])
               after = subprocess.check_output(['ldid', '-e', f'work/output/daemons/{name}'])
               if plistlib.loads(before) != plistlib.loads(after):
                   raise SystemExit(f'{name}: entitlements changed')
               print(f'[+] {name}: ad-hoc signature and entitlements verified')
           PY
-          python3 verify_userland_signature.py work/output/daemons/{coreauthd,mobileactivationd,ctkd,usermanagerd}
+          python3 verify_userland_signature.py work/output/daemons/{coreauthd,mobileactivationd,ctkd}
 
       - name: Patch and sign XR Setup executable like Liter8
         shell: bash
@@ -166,11 +166,7 @@ jobs:
           cat > work/output/README.txt <<'EOF'
           XRa1n / iPhone11,8 / iOS 18.7.10 (22H374) userland build
 
-          daemons/: four guarded patched, entitlement-preserving ad-hoc signed daemons.
-                    usermanagerd keeps the diagnostics DeviceTree while enabling
-                    normal loading of an already-provisioned persona. Its native
-                    early-boot initializer remains diagnostics-gated because
-                    forcing it selected a fresh User-volume environment.
+          daemons/: three guarded patched, entitlement-preserving ad-hoc signed daemons.
           launchd: guarded weak /usr/lib/lhook dependency; stock CodeDirectory
                    code-slot hashes repaired without replacing special slots.
           hook/: Liter8-derived universal arm64+arm64e signed hook payloads.

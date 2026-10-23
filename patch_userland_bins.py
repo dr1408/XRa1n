@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch the four post-restore userland daemons for XR 22H374.
+"""Patch the three post-restore userland daemons for XR 22H374.
 
 This is the small, dependency-free XRa1n counterpart of Liter8's
 CoreAuthDResolver, MobileActivationDResolver and CTKDResolver.  It is locked to
@@ -7,7 +7,7 @@ the pristine binaries collected for iPhone11,8 / iOS 18.7.10 and checks both
 the complete input digest and every instruction pre-image before writing.
 
 The source directory must contain:
-  coreauthd, mobileactivationd, ctkd, usermanagerd
+  coreauthd, mobileactivationd, ctkd
 
 By default patched copies and JSON patch records are written to ``patched/``;
 the pristine inputs are never modified.  Use --check to validate only.
@@ -138,18 +138,6 @@ PATCHES = {
             ),
         ],
     ),
-    "usermanagerd": (
-        "4dd3412ac0f6619af541077ab8f14fb78da6d9b5c8713b6f88f231aaa7c05e69",
-        [
-            Patch(
-                "usermanagerd.normal.diagnostics-gate",
-                0x51408,
-                0x370000C0,
-                NOP,
-                "Run normal session/persona loading in diagnostics mode",
-            ),
-        ],
-    ),
 }
 
 
@@ -157,7 +145,6 @@ SIGNING_IDENTIFIERS = {
     "coreauthd": "com.apple.coreauthd",
     "mobileactivationd": "com.apple.mobileactivationd",
     "ctkd": "com.apple.ctkd",
-    "usermanagerd": "com.apple.usermanagerd",
 }
 
 
