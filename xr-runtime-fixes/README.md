@@ -19,12 +19,13 @@ iPhone11,8 / 22H374:
 - `l8persona.dylib` plus its filter plist: a marker-gated
   `MIAppIdentity` fallback loaded only into `installd` and
   `installcoordinationd`.
-- PhotoForce: `pfruntimeprobe` and `pfwatch`. This is not a dylib; the entitled
+- PhotoForce: `pfruntimeprobe` and `pfwatch`. This is not a dylib; the ad-hoc-signed
   watcher applies a runtime PosterFoundation cache repair to every PosterBoard
   process. Its resolver accepts both observed adjacent-global layouts while
   requiring one unique match.
 
-All are built with an iOS 18 deployment target. The persona tweak carries no
-entitlements. The PhotoForce executables are signed exactly as Liter8 does,
-using `ldid -S... -Cadhoc`, with only the task-port entitlements declared in
-`pfruntimeprobe.ent`.
+All are built with an iOS 18 deployment target. The persona tweak and PhotoForce
+executables carry no entitlements. On XR 22H374 the entitlement-bearing PhotoForce
+builds were rejected before `main`; the entitlement-free probe reached
+`task_for_pid` but got `KERN_FAILURE (5)`. PhotoForce therefore uses
+`ldid -S -Cadhoc` and is tested with the separate AMFI task-port kernel patch.

@@ -1612,7 +1612,7 @@ returns `noPin | beenUnlocked` (`0x6`):
      install remain the acceptance test.
 
 2. **PhotoForce (`pfruntimeprobe` + `pfwatch`) — wallpaper store repair**
-   - This fix is two entitled executables, not an injected dylib. `pfwatch`
+   - This fix is two ad-hoc-signed executables, not an injected dylib. `pfwatch`
      observes PosterBoard PIDs and invokes the probe to replace the cached
      PosterFoundation URL-resource contract in that process.
    - Exact 22H374 analysis found `_PFPosterPathURLResourceValues` at
@@ -1620,9 +1620,14 @@ returns `noPin | beenUnlocked` (`0x6`):
    - Liter8's original resolver assumed `object == once + 8`; 22H374 reverses
      those globals. The repository resolver now accepts either adjacent order
      while still requiring one unique pair. The local matcher passes.
-   - First deployment result: both executables were killed with signal 9 when
-     signed using plain `codesign -`. The workflow now matches Liter8 exactly
-     with `ldid -S... -Cadhoc`; rebuild and redeploy before repeating acceptance.
+   - Entitlement-bearing builds were rejected before `main`. An entitlement-free
+     probe reached `task_for_pid(PosterBoard)` but returned `KERN_FAILURE (5)`.
+     The workflow now signs both PhotoForce binaries with `ldid -S -Cadhoc`,
+     without task-port entitlements. The XR kernel patcher redirects the
+     terminal denial branch of AMFI's get-task policy to its existing success
+     cleanup (`0x020834B0`, stock `0x17FFFFF1`). This is a guarded, untested
+     hypothesis; a normal boot must confirm the probe reaches `main` and whether
+     `task_for_pid` succeeds before calling wallpaper repair fixed.
    - Acceptance: watcher remains alive, its log records ensure exit 0, the
      default wallpaper appears, and creating/selecting a wallpaper survives a
      PosterBoard restart.

@@ -298,6 +298,20 @@ PATCHES: tuple[Patch, ...] = (
     Patch("kernel.amfi.dyld-policy.2", "amfi", 0x02084460, 0x97FFDD9D, 0x52800020, "Accept second dyld policy helper"),
     Patch("kernel.amfi.post-validation", "amfi", 0x02083950, 0x7100081F, 0x6B00001F, "Force AMFI post-validation comparison equal"),
 
+    # AppleMobileFileIntegrity's get-task policy returns 1 at this terminal
+    # denial edge when an otherwise valid caller lacks task-port entitlements.
+    # Redirect only that edge to the function's existing success block, which
+    # releases the target proc reference before returning 0. The missing-target
+    # and Developer Mode failure paths retain their original behavior.
+    Patch(
+        "kernel.amfi.task-port.terminal-denial",
+        "amfi-task-port",
+        0x020834B0,
+        0x17FFFFF1,
+        branch(0x020834B0, 0x0208336C),
+        "Allow the terminal AMFI task-port policy path via its native success cleanup",
+    ),
+
     Patch("kernel.debugger.result", "debugger", 0x015B50C8, 0x90FFA4E8, 0xD2800020, "Force PE_i_can_has_debugger true"),
     Patch("kernel.debugger.return", "debugger", 0x015B50CC, 0xB40000E0, RET, "Return debugger permission"),
     Patch("kernel.ppl.loaded-trust-cache", "ppl", 0x015F7FF0, 0x1A9F17E0, 0x52800020, "Force PPL loaded trust-cache result true"),
@@ -394,8 +408,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 129:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 129, got {len(selected)}")
+    if len(selected) != 130:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 130, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()

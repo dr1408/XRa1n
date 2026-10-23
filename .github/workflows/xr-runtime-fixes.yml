@@ -136,10 +136,10 @@ jobs:
           for name in pfruntimeprobe pfwatch; do
             lipo -create "$OUT/${name}.arm64" "$OUT/${name}.arm64e" \
               -output "$OUT/${name}"
-            # Match Liter8 exactly. These privileged executables need an
-            # ad-hoc CodeDirectory carrying the task-port entitlements; plain
-            # `codesign -` was killed by AMFI at exec time on 22H374.
-            ldid -Sxr-runtime-fixes/pfruntimeprobe.ent -Cadhoc "$OUT/${name}"
+            # On XR 22H374 the task-port entitlements cause a pre-main exec
+            # rejection. Keep ldid's ad-hoc signature, but omit entitlements;
+            # the separate guarded AMFI task-port kernel patch is tested next.
+            ldid -S -Cadhoc "$OUT/${name}"
           done
           rm -f "$OUT"/*.arm64 "$OUT"/*.arm64e \
                 "$OUT"/*.arm64.dylib "$OUT"/*.arm64e.dylib
@@ -190,8 +190,7 @@ jobs:
                      work/xr-runtime-fixes/pfwatch; do
             test "$(lipo -archs "$BIN")" = "arm64 arm64e"
             codesign --verify --strict "$BIN"
-            ldid -e "$BIN" | grep -q 'com.apple.system-task-ports'
-            ldid -e "$BIN" | grep -q 'task_for_pid-allow'
+            test -z "$(ldid -e "$BIN")"
           done
           strings -a work/xr-runtime-fixes/pfruntimeprobe \
             | grep -Fx 'PFPosterPathURLResourceValues'
