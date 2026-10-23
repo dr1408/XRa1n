@@ -294,27 +294,6 @@ PATCHES: tuple[Patch, ...] = (
     Patch("kernel.amfi.launch-constraints.return", "amfi", 0x0207BD8C, 0xA9BA6FFC, RET, "Return from launch constraints"),
     Patch("kernel.amfi.developer-mode.result", "amfi", 0x01323A9C, 0xB0FFB6E8, 0x52800020, "Force developer mode enabled"),
     Patch("kernel.amfi.developer-mode.return", "amfi", 0x01323AA0, 0xF942B108, RET, "Return developer-mode state"),
-    # Match usbliter8-fun's separate postValidation edge as well as forcing the
-    # shared developer-mode accessor above.  This branch is the local-signing
-    # entitlement gate immediately before get-task-allow/OOP-JIT processing.
-    # Taking its existing allowed target avoids the "Developer mode is disabled"
-    # rejection without bypassing the remainder of postValidation.
-    Patch("kernel.amfi.developer-entitlements", "amfi", 0x02083AC4, 0x37000180, 0x1400000C, "Always take the developer-entitlement allowed path"),
-    # vnode_check_signature rejects locally/ad-hoc-signed code carrying any
-    # entitlements before installing the enumeration callback below unless
-    # code-directory state bit 56 is set.  Take the function's existing
-    # enumeration path unconditionally: it constructs the guarded callback
-    # context and validates every entitlement rather than marking the vnode
-    # invalid at the "disallowing locally signed library with entitlements"
-    # diagnostic.  Derived in IDA from 22H374 at VA 0xfffffff0090861e0;
-    # the existing target is 0xfffffff009086308.
-    Patch("kernel.amfi.local-signing-entitlement-gate", "amfi", 0x020821E0, 0xB7C00953, 0x1400004A, "Route locally signed entitlements through the validation callback"),
-    # XR performs a second, independent allowlist check for every entitlement
-    # carried by a locally/ad-hoc-signed executable.  Keep the callback's
-    # parsing, context update and cleanup intact, but make this one validator
-    # verdict true.  This is the kernel-side counterpart of Liter8 TXM's
-    # unrestricted-local-signing/restricted-entitlement policy.
-    Patch("kernel.amfi.local-signing-entitlements", "amfi", 0x02084304, 0x97FFC77A, 0x52800020, "Accept locally signed entitlement values"),
     Patch("kernel.amfi.dyld-policy.1", "amfi", 0x02084454, 0x97CA7D92, 0x52800020, "Accept first dyld policy helper"),
     Patch("kernel.amfi.dyld-policy.2", "amfi", 0x02084460, 0x97FFDD9D, 0x52800020, "Accept second dyld policy helper"),
     Patch("kernel.amfi.post-validation", "amfi", 0x02083950, 0x7100081F, 0x6B00001F, "Force AMFI post-validation comparison equal"),
@@ -415,8 +394,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 132:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 132, got {len(selected)}")
+    if len(selected) != 129:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 129, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
