@@ -430,6 +430,20 @@ PATCHES: tuple[Patch, ...] = (
 
 
 BLOB_PATCHES: tuple[BlobPatch, ...] = (
+    # XNU exception-port behavior enforcement. Broad trust-cache acceptance
+    # gives App Store binaries platform IPC policy; third-party crash SDKs that
+    # register EXCEPTION_DEFAULT would then be killed with EXC_GUARD /
+    # SET_EXCEPTION_BEHAVIOR. Clear thid_should_crash so the policy helper
+    # ignores that violation instead. Located from the sole reference to
+    # com.apple.security.only-one-exception-port and its guarded LDRB path.
+    BlobPatch(
+        "kernel.exception-port.behavior-enforcement",
+        "exception-port",
+        0x009B2B20,
+        b"\x01",
+        b"\x00",
+        "Ignore non-identity-protected exception-port registrations instead of killing the caller",
+    ),
     BlobPatch(
         "kernel.aks.external-method-gate-body",
         "sep-aks",
@@ -497,8 +511,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 142:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 142, got {len(selected)}")
+    if len(selected) != 143:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 143, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
