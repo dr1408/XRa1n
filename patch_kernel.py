@@ -384,6 +384,22 @@ PATCHES: tuple[Patch, ...] = (
         0xEB1F03FF,
         "Take task_conversion_eval_internal's caller-equals-victim path",
     ),
+    # A second task-port conversion path performs the same caller-versus-victim
+    # policy after resolving another task object.  This is the XR homolog of
+    # the iPad resolver's conversion.1 record: IDA shows CMP X21,X20 followed
+    # by the native equality-success edge, kernel_task comparisons, and the
+    # paired platform-task queries.  The read-only path can succeed without
+    # reaching this gate, while task_suspend/mach_vm_write exercise the later
+    # control path.  Force only the equality result; all object validation and
+    # the surrounding port-conversion mechanics remain intact.
+    Patch(
+        "kernel.task-access.conversion.1",
+        "task-access",
+        0x00E5FFF8,
+        0xEB1402BF,
+        0xEB1F03FF,
+        "Take the second caller-equals-victim task conversion path",
+    ),
 
     Patch("kernel.debugger.result", "debugger", 0x015B50C8, 0x90FFA4E8, 0xD2800020, "Force PE_i_can_has_debugger true"),
     Patch("kernel.debugger.return", "debugger", 0x015B50CC, 0xB40000E0, RET, "Return debugger permission"),
@@ -481,8 +497,8 @@ def resolve(source: Path) -> tuple[bytearray, list[dict[str, object]]]:
         )
 
     selected: tuple[Patch | BlobPatch, ...] = (*PATCHES, *BLOB_PATCHES)
-    if len(selected) != 141:
-        raise SystemExit(f"[!] internal patch inventory mismatch: expected 141, got {len(selected)}")
+    if len(selected) != 142:
+        raise SystemExit(f"[!] internal patch inventory mismatch: expected 142, got {len(selected)}")
 
     # Validate the complete selected plan before mutating the in-memory image.
     seen: set[int] = set()
