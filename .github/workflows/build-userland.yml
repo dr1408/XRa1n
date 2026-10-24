@@ -145,6 +145,34 @@ jobs:
           print('[+] launchd structure and code slots verified')
           PY
 
+      - name: Patch lockdownd with release pairing hook only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p test_lockdownd_weakload.py -v
+          mkdir -p work/output/pairing
+          python3 patch_lockdownd_weakload.py bins/lockdownd \
+            --output work/output/pairing/lockdownd
+          python3 userland/liter8/resign_pagehashes.py \
+            work/output/pairing/lockdownd --apply
+          python3 verify_userland_signature.py work/output/pairing/lockdownd
+          otool -L work/output/pairing/lockdownd \
+            | grep -F '/usr/lib/xra1n-pair.dylib'
+          ! otool -L work/output/pairing/lockdownd \
+            | grep -F 'l8pair-probe.dylib'
+          ! strings -a work/output/pairing/lockdownd \
+            | grep -F 'l8pair-probe'
+          cmp <(ldid -e bins/lockdownd) \
+              <(ldid -e work/output/pairing/lockdownd)
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = '747124d325ddac9d81b5722603b5cb361e57582dfc08cb1f9631efb3f1ee4c2d'
+          path = Path('work/output/pairing/lockdownd')
+          assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
+          print('[+] release-only lockdownd hash and original entitlements verified')
+          PY
+
       - name: Build and sign Liter8-compatible hook payloads
         shell: bash
         run: |
@@ -169,6 +197,9 @@ jobs:
           daemons/: three guarded patched, entitlement-preserving ad-hoc signed daemons.
           launchd: guarded weak /usr/lib/lhook dependency; stock CodeDirectory
                    code-slot hashes repaired without replacing special slots.
+          pairing/lockdownd: guarded weak /usr/lib/xra1n-pair.dylib dependency;
+                   no diagnostic l8pair-probe load; original signature's code
+                   slots repaired and original entitlements preserved.
           hook/: Liter8-derived universal arm64+arm64e signed hook payloads.
           setup/Setup: XR 22H374 Setup executable, 58 class-owned methods
                        patched and ad-hoc signed with Liter8's original
