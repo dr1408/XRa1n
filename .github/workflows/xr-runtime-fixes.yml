@@ -35,34 +35,6 @@ jobs:
           mkdir -p work/xr-runtime-fixes
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           CLANG="$(xcrun --sdk iphoneos --find clang)"
-          SOURCE=xr-runtime-fixes/l8pair_probe.c
-          INSTALL_NAME=/usr/lib/l8pair-probe.dylib
-
-          for arch in arm64 arm64e; do
-            "$CLANG" \
-              -target "${arch}-apple-ios18.0" \
-              -isysroot "$SDK" \
-              -Os -fvisibility=hidden -fno-common \
-              -Wall -Wextra -Werror \
-              -dynamiclib \
-              -Wl,-install_name,"$INSTALL_NAME" \
-              -Wl,-not_for_dyld_shared_cache \
-              "$SOURCE" \
-              -o "work/xr-runtime-fixes/l8pair-probe.${arch}.dylib"
-            # Sign each thin image with Apple's signer before lipo.  The
-            # Procursus ldid build available on this runner did not emit a
-            # CodeDirectory that macOS codesign recognized for these dylibs.
-            codesign --force --sign - --timestamp=none \
-              "work/xr-runtime-fixes/l8pair-probe.${arch}.dylib"
-            codesign --verify --strict \
-              "work/xr-runtime-fixes/l8pair-probe.${arch}.dylib"
-          done
-
-          lipo -create \
-            work/xr-runtime-fixes/l8pair-probe.arm64.dylib \
-            work/xr-runtime-fixes/l8pair-probe.arm64e.dylib \
-            -output work/xr-runtime-fixes/l8pair-probe.dylib
-
           for arch in arm64 arm64e; do
             TARGET="${arch}-apple-ios18.0"
             "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
@@ -104,6 +76,15 @@ jobs:
           CLANG="$(xcrun --sdk iphoneos --find clang)"
           OUT=work/xr-runtime-fixes
 
+          # Exercise the exact ACM-error matcher on the macOS runner before
+          # producing the device payload. This does not install a hook.
+          xcrun clang -DLITER8_LOCALAUTH_TEST \
+            -DLITER8_LOCALAUTH_TRANSLATION_ONLY -framework Foundation \
+            -framework LocalAuthentication xr-runtime-fixes/l8localauth.m \
+            -o "$OUT/l8localauth-test"
+          "$OUT/l8localauth-test"
+          rm "$OUT/l8localauth-test"
+
           # ElleKit/TweakLoader persona payload. It resolves private classes at
           # runtime and intentionally links only Foundation.
           for arch in arm64 arm64e; do
@@ -114,6 +95,14 @@ jobs:
               -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8persona.dylib \
               -framework Foundation xr-runtime-fixes/l8persona.m \
               -o "$OUT/l8persona.${arch}.dylib"
+            # Only nehelper receives the LocalAuthentication fallback. The
+            # plist filter and the constructor both enforce that scope.
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fblocks -fvisibility=hidden -fno-common -Wall -Wextra \
+              -dynamiclib -Wl,-not_for_dyld_shared_cache \
+              -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8localauth.dylib \
+              -framework Foundation xr-runtime-fixes/l8localauth.m \
+              -o "$OUT/l8localauth.${arch}.dylib"
             # PhotoForce is not an injected dylib. The privileged probe edits
             # PosterBoard's cached PosterFoundation dictionary, and pfwatch
             # reapplies it to each new PosterBoard process.
@@ -127,7 +116,7 @@ jobs:
               -o "$OUT/pfwatch.${arch}"
           done
 
-          for name in l8persona; do
+          for name in l8persona l8localauth; do
             lipo -create "$OUT/${name}.arm64.dylib" "$OUT/${name}.arm64e.dylib" \
               -output "$OUT/${name}.dylib"
             codesign --force --sign - --timestamp=none "$OUT/${name}.dylib"
@@ -148,13 +137,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DYLIB=work/xr-runtime-fixes/l8pair-probe.dylib
-          test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
-          otool -D "$DYLIB" | grep -Fx '/usr/lib/l8pair-probe.dylib'
-          strings -a "$DYLIB" | grep -Fx 'XRA1N_L8PAIR_PROBE loaded pid=%d executable=%s'
-          strings -a "$DYLIB" | grep -Fx '/private/var/root/Library/Lockdown/xra1n-l8pair-probe.log'
-          test -z "$(ldid -e "$DYLIB")"
-          codesign --verify --strict "$DYLIB"
           for DYLIB in work/xr-runtime-fixes/xra1n-pair.dylib \
                        work/xr-runtime-fixes/xra1n-coreauth.dylib; do
             test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
@@ -176,7 +158,8 @@ jobs:
             | grep -F 'policy 1028 measured LA failure'
           strings -a work/xr-runtime-fixes/xra1n-coreauth.dylib \
             | grep -F 'ratchetStateFromState:'
-          for DYLIB in work/xr-runtime-fixes/l8persona.dylib; do
+          for DYLIB in work/xr-runtime-fixes/l8persona.dylib \
+                       work/xr-runtime-fixes/l8localauth.dylib; do
             test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
             codesign --verify --strict "$DYLIB"
             test -z "$(ldid -e "$DYLIB")"
@@ -186,6 +169,19 @@ jobs:
           strings -a work/xr-runtime-fixes/l8persona.dylib \
             | grep -Fx 'CONTAINER_PERSONA_PRIMARY'
           plutil -lint work/xr-runtime-fixes/l8persona.plist
+          plutil -lint work/xr-runtime-fixes/l8localauth.plist
+          otool -D work/xr-runtime-fixes/l8localauth.dylib \
+            | grep -Fx '/var/jb/usr/lib/TweakInject/l8localauth.dylib'
+          ! otool -L work/xr-runtime-fixes/l8localauth.dylib \
+            | grep -q LocalAuthentication
+          strings -a work/xr-runtime-fixes/l8localauth.dylib \
+            | grep -Fx '/private/var/jb/.liter8-localauth'
+          python3 - <<'PY'
+          import plistlib
+          with open('work/xr-runtime-fixes/l8localauth.plist', 'rb') as f:
+              plist = plistlib.load(f)
+          assert plist == {'Filter': {'Executables': ['nehelper']}}, plist
+          PY
           for BIN in work/xr-runtime-fixes/pfruntimeprobe \
                      work/xr-runtime-fixes/pfwatch; do
             test "$(lipo -archs "$BIN")" = "arm64 arm64e"
@@ -209,11 +205,12 @@ jobs:
         with:
           name: xr-runtime-fixes-${{ github.sha }}
           path: |
-            work/xr-runtime-fixes/l8pair-probe.dylib
             work/xr-runtime-fixes/xra1n-pair.dylib
             work/xr-runtime-fixes/xra1n-coreauth.dylib
             work/xr-runtime-fixes/l8persona.dylib
             work/xr-runtime-fixes/l8persona.plist
+            work/xr-runtime-fixes/l8localauth.dylib
+            work/xr-runtime-fixes/l8localauth.plist
             work/xr-runtime-fixes/pfruntimeprobe
             work/xr-runtime-fixes/pfwatch
             work/xr-runtime-fixes/SHA256SUMS

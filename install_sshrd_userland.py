@@ -93,7 +93,6 @@ PAIR_FILES = {
     "pair-coreauthd": (ROOT / "work/pairing-full/coreauthd.xra1n", "02de51020a8a9d0509983088226cfc59bc4db04c73479a7eb14fbc8ed1f5ca1e"),
     "xra1n-pair.dylib": (PAIR_ROOT / "xra1n-pair.dylib", "8f05b10601a2416c78fbf0f95d2a3b3e34c691cc3ee6647ed1a909041791bf1b"),
     "xra1n-coreauth.dylib": (PAIR_ROOT / "xra1n-coreauth.dylib", "9699c1e76949e29e3c0db5928685201b46b0c1064a416951031ca892f6f74e63"),
-    "l8pair-probe.dylib": (PAIR_ROOT / "l8pair-probe.dylib", "ffd208fcdb43c8dce8c00f2fb000c1ecd27091c714708042a772b7d35f01b195"),
 }
 LAUNCHD_HOOK_FILES = {
     "launchd": (ROOT / "work/artifacts/launchd-lhook/20261020-test/launchd", "641583bb8eb5f274bc31a502552bcb3b46990ffaeb0892c053f25ec583450807"),
@@ -908,7 +907,6 @@ def install_pairing_and_launchd_hook(usb: USBSSH, ticket_id: str,
         "pair-coreauthd": "/mnt1/System/Library/Frameworks/LocalAuthentication.framework/Support/coreauthd",
         "xra1n-pair.dylib": "/mnt1/usr/lib/xra1n-pair.dylib",
         "xra1n-coreauth.dylib": "/mnt1/usr/lib/xra1n-coreauth.dylib",
-        "l8pair-probe.dylib": "/mnt1/usr/lib/l8pair-probe.dylib",
         "launchd": "/mnt1/sbin/launchd", "lhook": "/mnt1/usr/lib/lhook",
     }
     marker = "/mnt2/root/Library/Lockdown/.xra1n-pairing-fallback"
