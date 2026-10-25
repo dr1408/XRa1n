@@ -4,6 +4,72 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <stdio.h>
+#import <unistd.h>
+
+static id property(id object, NSString *name) {
+    if (!object || ![object respondsToSelector:NSSelectorFromString(name)]) return nil;
+    @try { return [object valueForKey:name]; }
+    @catch (NSException *exception) {
+        printf("PROPERTY %s exception=%s\n", name.UTF8String, exception.name.UTF8String);
+        return nil;
+    }
+}
+
+static void printPersona(const char *source, id persona) {
+    printf("PERSONA %s class=%s unique=%s type=%s uid=%s gid=%s\n", source,
+           persona ? object_getClassName(persona) : "nil",
+           [property(persona, @"userPersonaUniqueString") description].UTF8String ?: "nil",
+           [property(persona, @"userPersonaType") description].UTF8String ?: "nil",
+           [property(persona, @"uid") description].UTF8String ?: "nil",
+           [property(persona, @"gid") description].UTF8String ?: "nil");
+}
+
+static void printAttributes(const char *source, id attributes, NSError *error) {
+    printf("ATTR %s class=%s unique=%s type=%s id=%s layout=%s error=%s:%ld\n", source,
+           attributes ? object_getClassName(attributes) : "nil",
+           [property(attributes, @"userPersonaUniqueString") description].UTF8String ?: "nil",
+           [property(attributes, @"userPersonaType") description].UTF8String ?: "nil",
+           [property(attributes, @"userPersona_id") description].UTF8String ?: "nil",
+           [property(attributes, @"personaLayoutPathURL") description].UTF8String ?: "nil",
+           error.domain.UTF8String ?: "nil", (long)error.code);
+}
+
+static void inspectPersonaValues(void) {
+    printf("IDENTITY uid=%u euid=%u\n", getuid(), geteuid());
+    Class managerClass = objc_lookUpClass("UMUserManager");
+    SEL shared = sel_registerName("sharedManager");
+    SEL current = sel_registerName("currentPersona");
+    id manager = managerClass && [managerClass respondsToSelector:shared]
+        ? ((id (*)(id, SEL))objc_msgSend)(managerClass, shared) : nil;
+    id managerPersona = manager && [manager respondsToSelector:current]
+        ? ((id (*)(id, SEL))objc_msgSend)(manager, current) : nil;
+    printPersona("UMUserManager.currentPersona", managerPersona);
+
+    Class personaClass = objc_lookUpClass("UMUserPersona");
+    id classPersona = personaClass && [personaClass respondsToSelector:current]
+        ? ((id (*)(id, SEL))objc_msgSend)(personaClass, current) : nil;
+    printPersona("UMUserPersona.currentPersona", classPersona);
+
+    Class attrClass = objc_lookUpClass("UMUserPersonaAttributes");
+    SEL byType = sel_registerName("personaAttributesForPersonaType:withError:");
+    for (NSUInteger type = 0; type <= 5; type += type == 0 ? 2 : 3) {
+        NSError *error = nil;
+        id attrs = attrClass && [attrClass respondsToSelector:byType]
+            ? ((id (*)(id, SEL, NSUInteger, NSError **))objc_msgSend)(attrClass, byType, type, &error)
+            : nil;
+        char label[48]; snprintf(label, sizeof(label), "type=%lu", (unsigned long)type);
+        printAttributes(label, attrs, error);
+    }
+    NSString *unique = property(classPersona ?: managerPersona, @"userPersonaUniqueString");
+    if (unique.length) {
+        SEL byUnique = sel_registerName("personaAttributesForPersonaUniqueString:withError:");
+        NSError *error = nil;
+        id attrs = attrClass && [attrClass respondsToSelector:byUnique]
+            ? ((id (*)(id, SEL, id, NSError **))objc_msgSend)(attrClass, byUnique, unique, &error)
+            : nil;
+        printAttributes("current-unique", attrs, error);
+    }
+}
 
 static void inspectMethod(const char *className, const char *selectorName, BOOL classMethod) {
     Class cls = objc_lookUpClass(className);
@@ -26,6 +92,7 @@ static void inspectABI(void) {
     }
 
     inspectMethod("UMUserManager", "currentPersona", NO);
+    inspectMethod("UMUserManager", "sharedManager", YES);
     inspectMethod("UMUserPersona", "currentPersona", YES);
     inspectMethod("UMUserPersonaAttributes", "personaAttributesForPersonaType:withError:", YES);
     inspectMethod("UMUserPersonaAttributes", "personaAttributesForPersonaUniqueString:withError:", YES);
@@ -85,6 +152,7 @@ static int listLocalStorage(void) {
 int main(void) {
     @autoreleasepool {
         inspectABI();
+        inspectPersonaValues();
         return listLocalStorage();
     }
 }
