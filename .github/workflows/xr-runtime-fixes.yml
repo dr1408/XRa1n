@@ -103,6 +103,14 @@ jobs:
               -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8localauth.dylib \
               -framework Foundation xr-runtime-fixes/l8localauth.m \
               -o "$OUT/l8localauth.${arch}.dylib"
+            # XR-only, marker-gated Files LocalStorage compatibility. Installed
+            # inactive and enabled only for a controlled live-boot test.
+            "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+              -fblocks -fobjc-arc -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
+              -dynamiclib -Wl,-not_for_dyld_shared_cache \
+              -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8files.dylib \
+              -framework Foundation xr-runtime-fixes/l8files.m \
+              -o "$OUT/l8files.${arch}.dylib"
             # PhotoForce is not an injected dylib. The privileged probe edits
             # PosterBoard's cached PosterFoundation dictionary, and pfwatch
             # reapplies it to each new PosterBoard process.
@@ -116,7 +124,7 @@ jobs:
               -o "$OUT/pfwatch.${arch}"
           done
 
-          for name in l8persona l8localauth; do
+          for name in l8persona l8localauth l8files; do
             lipo -create "$OUT/${name}.arm64.dylib" "$OUT/${name}.arm64e.dylib" \
               -output "$OUT/${name}.dylib"
             codesign --force --sign - --timestamp=none "$OUT/${name}.dylib"
@@ -172,7 +180,8 @@ jobs:
           strings -a work/xr-runtime-fixes/xra1n-coreauth.dylib \
             | grep -F 'ratchetStateFromState:'
           for DYLIB in work/xr-runtime-fixes/l8persona.dylib \
-                       work/xr-runtime-fixes/l8localauth.dylib; do
+                       work/xr-runtime-fixes/l8localauth.dylib \
+                       work/xr-runtime-fixes/l8files.dylib; do
             test "$(lipo -archs "$DYLIB")" = "arm64 arm64e"
             codesign --verify --strict "$DYLIB"
             test -z "$(ldid -e "$DYLIB")"
@@ -183,17 +192,25 @@ jobs:
             | grep -Fx 'CONTAINER_PERSONA_PRIMARY'
           plutil -lint work/xr-runtime-fixes/l8persona.plist
           plutil -lint work/xr-runtime-fixes/l8localauth.plist
+          plutil -lint work/xr-runtime-fixes/l8files.plist
           otool -D work/xr-runtime-fixes/l8localauth.dylib \
             | grep -Fx '/var/jb/usr/lib/TweakInject/l8localauth.dylib'
           ! otool -L work/xr-runtime-fixes/l8localauth.dylib \
             | grep -q LocalAuthentication
           strings -a work/xr-runtime-fixes/l8localauth.dylib \
             | grep -Fx '/private/var/jb/.liter8-localauth'
+          strings -a work/xr-runtime-fixes/l8files.dylib \
+            | grep -Fx '/var/jb/.xra1n-files'
+          strings -a work/xr-runtime-fixes/l8files.dylib \
+            | grep -Fx '22H374'
           python3 - <<'PY'
           import plistlib
           with open('work/xr-runtime-fixes/l8localauth.plist', 'rb') as f:
               plist = plistlib.load(f)
           assert plist == {'Filter': {'Executables': ['nehelper']}}, plist
+          with open('work/xr-runtime-fixes/l8files.plist', 'rb') as f:
+              plist = plistlib.load(f)
+          assert plist == {'Filter': {'Executables': ['fileproviderd', 'LocalStorageFileProvider']}}, plist
           PY
           for BIN in work/xr-runtime-fixes/pfruntimeprobe \
                      work/xr-runtime-fixes/pfwatch; do
@@ -232,6 +249,8 @@ jobs:
             work/xr-runtime-fixes/l8persona.plist
             work/xr-runtime-fixes/l8localauth.dylib
             work/xr-runtime-fixes/l8localauth.plist
+            work/xr-runtime-fixes/l8files.dylib
+            work/xr-runtime-fixes/l8files.plist
             work/xr-runtime-fixes/pfruntimeprobe
             work/xr-runtime-fixes/pfwatch
             work/xr-runtime-fixes/filesdiag
