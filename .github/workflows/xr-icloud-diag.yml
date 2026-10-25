@@ -41,7 +41,8 @@ jobs:
           import plistlib
           with open('xr-runtime-fixes/l8iclouddiag.plist', 'rb') as f:
               p = plistlib.load(f)
-          assert p == {'Filter': {'Executables': ['AAUIFollowUpExtension']}}, p
+          assert p == {'Filter': {'Executables': [
+              'AAUIFollowUpExtension', 'Preferences', 'MobileSafari']}}, p
           PY
           cp xr-runtime-fixes/l8iclouddiag.plist work/xr-icloud-diag/
           strings -a work/xr-icloud-diag/l8iclouddiag.dylib \

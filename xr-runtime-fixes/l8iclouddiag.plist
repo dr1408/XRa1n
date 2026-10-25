@@ -7,6 +7,8 @@
         <key>Executables</key>
         <array>
             <string>AAUIFollowUpExtension</string>
+            <string>Preferences</string>
+            <string>MobileSafari</string>
         </array>
     </dict>
 </dict>
