@@ -1,0 +1,51 @@
+name: Repack XR iBEC with iBoot LZFSE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repack:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ipsw
+        run: |
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install blacktop/tap/ipsw
+      - name: Download only pristine XR iBEC
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/ibec
+          URL="$(ipsw download appledb --no-color --os iOS --device iPhone11,8 --build 22H374 --urls | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^https:\/\//) { print $i; exit } }')"
+          test -n "$URL"
+          ipsw extract --no-color --remote --pattern '(^|/)iBEC\.n841\.RELEASE\.im4p$' --output work/ibec "$URL"
+          STOCK="$(find work/ibec -type f -name iBEC.n841.RELEASE.im4p -print -quit)"
+          test -n "$STOCK"
+          cp "$STOCK" work/ibec/stock.im4p
+          echo '3144c71047372ddc31912a16ad242f5900dccdb4396c2ca53404ebad28004f83  work/ibec/stock.im4p' | shasum -a 256 -c -
+      - name: Patch and repack iBEC with Apple algorithm 0x891
+        shell: bash
+        run: |
+          set -euo pipefail
+          ipsw img4 im4p extract --output work/ibec/stock.raw work/ibec/stock.im4p
+          echo '8d748ce2190a5889ecd4933bd212f90d1308d44d8cee1880ed92b4bbeb057753  work/ibec/stock.raw' | shasum -a 256 -c -
+          python3 patch_iboot.py work/ibec/stock.raw ibec --serial
+          echo '93721785df7a63dd44c6dae7a0f49a1ebc347f86144e39b5f1be64457a8b5a2c  work/ibec/stock.raw.patched' | shasum -a 256 -c -
+          python3 tools/repack-iboot-im4p.py work/ibec/stock.im4p work/ibec/stock.raw.patched work/ibec/iBEC.0x891.im4p
+          ipsw img4 im4p info --json work/ibec/iBEC.0x891.im4p > work/ibec/iBEC.0x891.json
+          ipsw img4 im4p extract --output work/ibec/verify.raw work/ibec/iBEC.0x891.im4p
+          cmp work/ibec/stock.raw.patched work/ibec/verify.raw
+          shasum -a 256 work/ibec/iBEC.0x891.im4p > work/ibec/iBEC.0x891.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xr-ibec-0x891
+          path: |
+            work/ibec/iBEC.0x891.im4p
+            work/ibec/iBEC.0x891.json
+            work/ibec/iBEC.0x891.sha256
