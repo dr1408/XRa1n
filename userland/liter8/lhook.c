@@ -101,10 +101,12 @@ static const char *kHardDeny[] = {
     NULL
 };
 
-/* Conservative fallback for services unrelated to tweak loading. */
+/* Conservative fallback for services unrelated to tweak loading. GSSCred traps
+ * in os_log_set_client_type when injected; keep it out of the tweak path. */
 static const char *kDefaultDeny[] = {
     "diskarbitrationd", "syslogd", "usbmuxd",
     "mobile_obliterator", "restored_external", "aslmanager",
+    "GSSCred",
     NULL
 };
 
@@ -463,8 +465,15 @@ int liter8_load_tweaks(void) {
      * iconservicesagent logged "deny(1) file-read-data /var/jb/.lhook_enabled"
      * and loaded nothing. The executable grant stays withheld until there is
      * something to dlopen, which was the point of gating at all. */
+    const char *read_token = getenv("LITER8_SANDBOX_READ_TOKEN");
+    int has_read_token = read_token && *read_token;
     if (consume_grant(0) != 0) return -1;
-    if (!lhook_session_enabled() || !strcmp(getprogname(), "xpcproxy") || denied(getprogname())) return 0;
+    /* The parent only supplies this read grant after validating the current
+     * boot session. Sandboxed apps cannot read kern.bootsessionuuid, so use
+     * the consumed parent decision instead of repeating that denied sysctl.
+     * Callers without a parent grant retain the UUID-bound check. */
+    int enabled = has_read_token ? 1 : lhook_session_enabled();
+    if (!enabled || !strcmp(getprogname(), "xpcproxy") || denied(getprogname())) return 0;
     if (!file_exists(kLoader)) return 0;
     /* Only matters to profiles that check file-map-executable, so a refusal is
      * logged and the load continues. */

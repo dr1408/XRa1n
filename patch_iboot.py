@@ -25,7 +25,7 @@ Resolvers (all anchor-based, no hardcoded offsets):
    Patch: ibec.recovery-nonce.preserve
 
 Modes (determines which boot-args literal + whether to add recovery-nonce patch):
-  normal    "-v debug=0x2014e wdt=-1 launchd_unsecure_cache=1 amfi_get_out_of_my_way=1"
+  normal    "-v debug=0x2014e wdt=-1 launchd_unsecure_cache=1"
   restore   "-v wdt=-1 rd=md0 -restore"                              # iBSS-restore
   ramdisk   "rd=md0 -v wdt=-1 debug=0x2014e backlight-level=1024"    # SSHRD
   ibec      restore mode + ibec.recovery-nonce.preserve               # iBEC-restore
@@ -547,7 +547,7 @@ def resolve_ibec_recovery_nonce(
 # ---- main ------------------------------------------------------------------
 
 MODE_PRESETS = {
-    "normal":  "-v debug=0x2014e wdt=-1 launchd_unsecure_cache=1 amfi_get_out_of_my_way=1",
+    "normal":  "-v debug=0x2014e wdt=-1 launchd_unsecure_cache=1",
     "restore": "-v wdt=-1 rd=md0 -restore",
     "ramdisk": "rd=md0 -v wdt=-1 debug=0x2014e backlight-level=1024",
     "ibec":    "-v wdt=-1 rd=md0 -restore",  # same literal as restore + nonce patch
@@ -565,11 +565,18 @@ MODE_PRESETS = {
 #   * CLI flag --serial anywhere in sys.argv
 #   * a literal boot-args string that already contains "serial="  (then this
 #     logic is a no-op; the caller took responsibility)
+# The boot runners pass --serial or --no-serial explicitly. The latter takes
+# precedence over inherited environment settings so non-serial builds are
+# reproducible on a developer's serial-enabled shell.
 
 SERIAL_ARG = "serial=3"
 
 
 def serial_requested(argv: List[str]) -> bool:
+    if "--serial" in argv and "--no-serial" in argv:
+        raise ValueError("--serial and --no-serial are mutually exclusive")
+    if "--no-serial" in argv:
+        return False
     if "--serial" in argv:
         return True
     for key in ("XRA1N_SERIAL", "LITER8_SERIAL"):
@@ -590,7 +597,7 @@ def apply_serial(base: str, enabled: bool) -> str:
 def main():
     argv = list(sys.argv)
     serial = serial_requested(argv)
-    argv = [a for a in argv if a != "--serial"]
+    argv = [a for a in argv if a not in ("--serial", "--no-serial")]
 
     if len(argv) < 3:
         print(
@@ -598,7 +605,8 @@ def main():
             f"       mode: one of {sorted(MODE_PRESETS)} (uses preset boot-args)\n"
             f"       or:   literal string to use as boot-args\n"
             f"       iBEC-mode additionally applies ibec.recovery-nonce.preserve\n"
-            f"       --serial / XRA1N_SERIAL=1 / LITER8_SERIAL=1 appends '{SERIAL_ARG}'",
+            f"       --serial / XRA1N_SERIAL=1 / LITER8_SERIAL=1 appends '{SERIAL_ARG}'\n"
+            "       --no-serial suppresses it even if the environment requests serial",
             file=sys.stderr,
         )
         sys.exit(1)

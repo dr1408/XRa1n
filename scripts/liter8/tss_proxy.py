@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Loopback TSS proxy owned by one Liter8 restore operation.
+
+idevicerestore sends its TSS requests here. The proxy forwards them to Apple
+and retries status 168 once with the same reviewed eUICC fields used by the
+device-tested public beta-4 workflow. Request and response bodies are never
+printed because they contain device-specific signing material.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import ssl
+import tempfile
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from socketserver import TCPServer
+
+from apticket import publish_ticket, request_identity, ticket_from_tss_response
+
+
+UPSTREAM_TSS_URL = "https://gs.apple.com/TSS/controller?action=2"
+TSS_PATH = "/TSS/controller?action=2"
+EUICC_KEYS = (
+    "\t<key>eUICC,ApProductionMode</key>\n\t<true/>\n"
+    "\t<key>eUICC,ChipID</key>\n\t<integer>5</integer>\n"
+    "\t<key>eUICC,EID</key>\n\t<data>\n"
+    "\tiQSQMgBQCIgmAASEJAh2MQ==\n\t</data>\n"
+    "\t<key>eUICC,RootKeyIdentifier</key>\n\t<data>\n"
+    "\tQVhK/T5EfBDbGEdwMfU42u7Qx9M=\n\t</data>\n"
+)
+
+
+class TSSProxyServer(HTTPServer):
+    def server_bind(self) -> None:
+        # HTTPServer normally performs reverse DNS here via getfqdn(). A
+        # numeric loopback listener needs no hostname; macOS DNS stalls must
+        # not delay readiness or make a local restore depend on DNS health.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+def tss_status(response: bytes) -> str | None:
+    """Read only the leading STATUS field, before the encoded plist body."""
+    head = response.decode("utf-8", errors="replace").split("&", 1)[0]
+    return head.removeprefix("STATUS=").strip() if head.startswith("STATUS=") else None
+
+
+def inject_euicc(request: bytes) -> bytes:
+    """Insert the reviewed eUICC fields once into an XML plist request."""
+    text = request.decode("utf-8", errors="strict")
+    if "eUICC,ChipID" in text:
+        return request
+    closing_root = text.rfind("</dict>")
+    if closing_root < 0:
+        raise ValueError("TSS request has no root XML dictionary")
+    return (text[:closing_root] + EUICC_KEYS + text[closing_root:]).encode()
+
+
+class TSSProxyHandler(BaseHTTPRequestHandler):
+    """Forward TSS requests while exposing only concise progress."""
+
+    server_version = "Liter8TSS/1"
+
+    def do_GET(self) -> None:  # noqa: N802 - inherited API spelling
+        if self.path != "/health":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok\n")
+
+    def do_POST(self) -> None:  # noqa: N802 - inherited API spelling
+        if self.path != TSS_PATH:
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            request = self.rfile.read(length)
+            if len(request) != length:
+                raise ValueError("short TSS request body")
+
+            print(f"[tss] forwarding request ({length} bytes)", flush=True)
+            response = self.forward(request)
+            status = tss_status(response)
+            if status == "168":
+                print("[tss] status 168; retrying with reviewed eUICC fields", flush=True)
+                response = self.forward(inject_euicc(request))
+                status = tss_status(response)
+
+            # Only the main restore-signing reply contains ApImg4Ticket.
+            # Baseband, Rose, and Cryptex replies safely return None here.
+            ticket = ticket_from_tss_response(response)
+            if ticket is not None and self.server.expected_ticket_sha256 is not None:
+                actual = hashlib.sha256(ticket).hexdigest()
+                if actual != self.server.expected_ticket_sha256:
+                    raise ValueError("TSS AP ticket differs from the restore-OS boot ticket")
+            if ticket is not None and self.server.ticket_directory is not None:
+                metadata = request_identity(request)
+                metadata["profileID"] = self.server.profile_id
+                publish_ticket(
+                    ticket,
+                    self.server.ticket_directory,
+                    source="apple-tss-response",
+                    metadata=metadata,
+                )
+                print("[tss] captured and validated ApImg4Ticket", flush=True)
+                if self.server.capture_only:
+                    message = b"ticket captured; boot-stage response intentionally withheld\n"
+                    self.send_response(409)
+                    self.send_header("Content-Length", str(len(message)))
+                    self.end_headers()
+                    self.wfile.write(message)
+                    return
+
+            print(f"[tss] upstream status: {status or 'unknown'}", flush=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-www-form-urlencoded")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        except Exception as error:
+            print(f"[tss] upstream/proxy error: {type(error).__name__}: {error}", flush=True)
+            message = f"Liter8 TSS proxy failed: {error}".encode()
+            self.send_response(502)
+            self.send_header("Content-Length", str(len(message)))
+            self.end_headers()
+            self.wfile.write(message)
+
+    def forward(self, request_body: bytes) -> bytes:
+        request = urllib.request.Request(
+            UPSTREAM_TSS_URL,
+            data=request_body,
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "User-Agent": "InetURL/1.0",
+                "Cache-Control": "no-cache",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(
+            request, timeout=30, context=self.server.ssl_context
+        ) as response:
+            return response.read()
+
+    def log_message(self, format: str, *arguments: object) -> None:
+        # Lifecycle and upstream status are enough; suppress the noisy access log.
+        return
+
+
+def publish_ready(path: Path, *, pid: int, port: int) -> None:
+    """Publish readiness atomically so the parent never reads partial JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+        json.dump({"pid": pid, "port": port}, temporary)
+        temporary.write("\n")
+    os.replace(temporary_path, path)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--ready-file", type=Path, required=True)
+    parser.add_argument("--ticket-directory", type=Path)
+    parser.add_argument("--profile-id", default="unknown")
+    parser.add_argument("--ca-bundle", type=Path, required=True)
+    parser.add_argument("--capture-only", action="store_true")
+    parser.add_argument("--expected-ticket-sha256", help="reject a new AP ticket different from the booted restore OS")
+    arguments = parser.parse_args()
+
+    # Port zero asks the kernel for an unused port, avoiding collisions with a
+    # forgotten manual proxy while remaining reachable only from this Mac.
+    ca_bundle = arguments.ca_bundle.expanduser().resolve()
+    if not ca_bundle.is_file():
+        raise SystemExit(f"missing Apple TSS CA bundle: {ca_bundle}")
+    server = TSSProxyServer((arguments.bind, arguments.port), TSSProxyHandler)
+    server.ssl_context = ssl.create_default_context(cafile=str(ca_bundle))
+    server.capture_only = arguments.capture_only
+    server.expected_ticket_sha256 = arguments.expected_ticket_sha256
+    server.ticket_directory = arguments.ticket_directory
+    server.profile_id = arguments.profile_id
+    port = server.server_address[1]
+    publish_ready(arguments.ready_file, pid=os.getpid(), port=port)
+    print(f"[tss] listening on http://{arguments.bind}:{port} (pid {os.getpid()})", flush=True)
+    server.serve_forever(poll_interval=0.2)
+
+
+if __name__ == "__main__":
+    main()
