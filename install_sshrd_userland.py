@@ -8,48 +8,54 @@ Original executables are backed up ONLY on the device's Data volume.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
 import plistlib
+import re
 import shlex
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from boot_stage import selected_ticket
+from host_tools import configure as configure_host_tools, tool as host_tool
 
 ROOT = Path(__file__).resolve().parent
-ARCHIVE = ROOT / "payloads/bootstrap_1900.tar.zst"
-ARTIFACTS = ROOT / "userland-output-22H374"
-USBMUXD = Path("/usr/sbin/usbmuxd")
-IPROXY = Path("/picotool/spironolactone/Linux/aarch64/iproxy")
-SSHPASS = Path("/picotool/spironolactone/Linux/aarch64/sshpass")
+BUNDLE = ROOT / "install-bundle/iphone11,8-22H374"
+BUNDLE_ARCHIVE = ROOT / "dist/install-bundle-iphone11.8-22H374.tar.gz"
+BUNDLE_ARCHIVE_SHA256 = "1912c082ac59c7ef10e5883545adc62f30bd3de6686c63dc4f217f685687cb80"
+ARCHIVE = BUNDLE / "bootstrap/bootstrap_1900.tar.zst"
+ARTIFACTS = BUNDLE / "userland"
+USBMUXD = host_tool("usbmuxd")
+IPROXY = host_tool("iproxy")
+SSHPASS = host_tool("sshpass")
 BOOTSTRAP_SHA256 = "8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9cb"
 SETUP_PATH = "/mnt1/Applications/Setup.app/Setup"
 SETUP_PRISTINE_SHA256 = "595a9e839dcdba3dbaa93f74e63627f984ab56537ce6687a1a1c9a633338344d"
 SETUP_SIGNED_SHA256 = "68c7b8c1db70763465996ac3e152d8a92cd175e60b46523997caddbe33b8880f"
-SETUP_SIGNED = ROOT / "bins/Setup.patched.signed"
+SETUP_SIGNED = BUNDLE / "setup/Setup.patched.signed"
 COMMCENTER_PATH = "/mnt1/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter"
 COMMCENTER_PRISTINE_SHA256 = "77ef543a172aa293c1cbc43829789a8b83acafb468bf558b20b57dc2a7d8c44e"
 COMMCENTER_PATCHED_SHA256 = "81f995ac88597c3d9a0e3a18f4536af611b6a9f9f5b7c6dc7b5af3946013870c"
-COMMCENTER_ARTIFACT = ROOT / "work/commcenter-cellular-artifact/CommCenter"
-COMMCENTER_RECORDS = ROOT / "work/commcenter-cellular-artifact/patch-records.json"
-GUARDED_HOOK_ROOT = (ROOT / "work/artifacts/xra1n-jbboot/32f7fde" /
-                     "xra1n-jbboot-32f7fded1cba7c7028131f257e647e4c11303c0d")
-JBBOOT_ARTIFACT = GUARDED_HOOK_ROOT / "xra1n-jbboot"
-JBBOOT_SHA256 = "c82fa988cd501eb007aab668f20b8f320ab66e052187ebb48896c97915198d5b"
+COMMCENTER_ARTIFACT = BUNDLE / "commcenter/CommCenter"
+COMMCENTER_RECORDS = BUNDLE / "commcenter/patch-records.json"
+GUARDED_HOOK_ROOT = BUNDLE / "tweaks"
+JBBOOT_ARTIFACT = BUNDLE / "jbboot/xra1n-jbboot"
+JBBOOT_SHA256 = "d914b4757e618b45740030176599716bde9c8e8fbea14b357f93c7c146de0561"
 JBBOOT_UPGRADABLE_SHA256 = {
+    "c82fa988cd501eb007aab668f20b8f320ab66e052187ebb48896c97915198d5b",
     "8d6f719206c8245b9ce1364fec0877b6503aa5f1c2dc803c7288badda714e1bb",
     "42fd6bca0327fc7759768382e325e4a9564b044fac3d0f9c1be9c4f052a28088",
     "7fcaa73960ba36bacfa3e99eed5e4ef834f737629dc7c3f18a2b5f041287dd30",
 }
 JBBOOT_PATH = "/mnt1/usr/local/bin/xra1n-jbboot"
-SILEO_ARTIFACT = (ROOT / "work/artifacts/xra1n-jbboot" /
-                  "3b1876546cd7d42e5e9f68e96964f6494fdea0b1/Sileo.app.tar.gz")
+SILEO_ARTIFACT = BUNDLE / "apps/Sileo.app.tar.gz"
 SILEO_ARCHIVE_SHA256 = "648acf1e4230ca7c962394f2c652519e737b8041b27a4a8d92bb03d60db33b99"
 SILEO_BINARY_SHA256 = "b26abe6bd2cb4557dbcc381d2f8300cc21fc84cca1714e7671b5988e0d2e2cc3"
 SILEO_HELPER_SHA256 = "b108b9381bba5f0e503bcf8e8c17d8f8947c97529345b98b171fef2bde7e5f2a"
@@ -79,7 +85,7 @@ DROPBEAR_JOB = {
     "RunAtLoad": True, "StandardErrorPath": "/var/mobile/dropbear.log",
     "StandardOutPath": "/var/mobile/dropbear.log", "ThrottleInterval": 5,
 }
-NORMAL_SSH = ROOT / "work/artifacts/normal-ssh/22H374"
+NORMAL_SSH = BUNDLE / "ssh"
 NORMAL_SSH_FILES = {
     "dropbear": (NORMAL_SSH / "bin/dropbear", "89e789cd3ca755daa0cbc9b52a10f2373b021460a7c5a0cbd7a3a705126c5553"),
     "dropbearkey": (NORMAL_SSH / "bin/dropbearkey", "3c5747c3fce3e226e6fff132a305c67b948b83e41d8143de00e17087df9e6b67"),
@@ -87,15 +93,15 @@ NORMAL_SSH_FILES = {
     "ls": (NORMAL_SSH / "bin/ls", "84575bd31e2918494d60787dcdcf4a2b6c95837f433da95148717f288f1fa831"),
     "cat": (NORMAL_SSH / "bin/cat", "139b84461327f3c2ec6caea9baf7e4bcb773133741427a551b605924efb8abbe"),
 }
-PAIR_ROOT = ROOT / "work/artifacts/funny-dylibs/c943ce0/funny-dylibs-c943ce05e16eadfb2713c3a1913ab1167d5a1388"
+PAIR_ROOT = BUNDLE / "pairing"
 PAIR_FILES = {
-    "pair-lockdownd": (ROOT / "work/pairing-full/lockdownd.xra1n", "f9a61f872e5bf9917317b6d3c724c568257a9557c90274af4319cb826f72103b"),
-    "pair-coreauthd": (ROOT / "work/pairing-full/coreauthd.xra1n", "02de51020a8a9d0509983088226cfc59bc4db04c73479a7eb14fbc8ed1f5ca1e"),
+    "pair-lockdownd": (ARTIFACTS / "pairing/lockdownd", "747124d325ddac9d81b5722603b5cb361e57582dfc08cb1f9631efb3f1ee4c2d"),
+    "pair-coreauthd": (PAIR_ROOT / "coreauthd.xra1n", "02de51020a8a9d0509983088226cfc59bc4db04c73479a7eb14fbc8ed1f5ca1e"),
     "xra1n-pair.dylib": (PAIR_ROOT / "xra1n-pair.dylib", "8f05b10601a2416c78fbf0f95d2a3b3e34c691cc3ee6647ed1a909041791bf1b"),
     "xra1n-coreauth.dylib": (PAIR_ROOT / "xra1n-coreauth.dylib", "9699c1e76949e29e3c0db5928685201b46b0c1064a416951031ca892f6f74e63"),
 }
 LAUNCHD_HOOK_FILES = {
-    "launchd": (ROOT / "work/artifacts/launchd-lhook/20261020-test/launchd", "641583bb8eb5f274bc31a502552bcb3b46990ffaeb0892c053f25ec583450807"),
+    "launchd": (BUNDLE / "launchd/launchd", "641583bb8eb5f274bc31a502552bcb3b46990ffaeb0892c053f25ec583450807"),
     "lhook": (GUARDED_HOOK_ROOT / "lhook", "6d3c2ca94a15045ffe6c878f384cb504a58238c6fecde474436bf24fe50e03c7"),
 }
 TWEAK_STACK_FILES = {
@@ -105,6 +111,36 @@ TWEAK_STACK_FILES = {
     "MobileSafety.dylib": (GUARDED_HOOK_ROOT / "ellekit/MobileSafety.dylib", "9af9aa65dd32fb30dd47930e56080411fe39579cc5b04dc1c67959ee9467b401"),
     "ELLEKIT-LICENSE": (GUARDED_HOOK_ROOT / "ellekit/LICENSE", "ac3842df55783a43c093806730c480cecdd3c011dfb7fd001ec1ed5258fb0c08"),
     "ellekit.deb": (GUARDED_HOOK_ROOT / "ellekit/ellekit_1.2_iphoneos-arm64.deb", "e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc"),
+}
+XR_RUNTIME_FILES = {
+    "pfwatch": (BUNDLE / "runtime/pfwatch",
+                "b4e460dd2aa6af4b181f1606bb00cb6a3162fef3da9b763727d34ba3cd81b822",
+                "/mnt1/usr/local/bin/pfwatch", 0o755),
+    "pfruntimeprobe": (BUNDLE / "runtime/pfruntimeprobe",
+                       "f26002769dd753e37604de6b63caa388a812de9a4dd856382beb66eb0e86912b",
+                       "/mnt1/usr/local/bin/pfruntimeprobe", 0o755),
+    "l8persona.dylib": (BUNDLE / "runtime/l8persona.dylib",
+                        "27e8609f31d3e96ce45c1abbdd5f1921a451bb31799d71f8e22ca8e52f98755f",
+                        "/mnt2/jb/usr/lib/TweakInject/l8persona.dylib", 0o755),
+    "l8persona.plist": (BUNDLE / "runtime/l8persona.plist",
+                        "4250dc6ed4935a8a7105e7d1f35adf75008a288f5898e1528ec1225101684173",
+                        "/mnt2/jb/usr/lib/TweakInject/l8persona.plist", 0o644),
+    "l8localauth.dylib": (BUNDLE / "runtime/l8localauth.dylib",
+                          "a208623578cce5c12041200a736949c7bc1dfcf782209835515993157d658113",
+                          "/mnt2/jb/usr/lib/TweakInject/l8localauth.dylib", 0o755),
+    "l8localauth.plist": (BUNDLE / "runtime/l8localauth.plist",
+                          "d77ac9bd85af38d8e01174496dec7ee9fc97f61fe57eb7b387f5ca13d7fb0d0e",
+                          "/mnt2/jb/usr/lib/TweakInject/l8localauth.plist", 0o644),
+    "l8files.dylib": (BUNDLE / "runtime/l8files.dylib",
+                       "f97a68c9c376bb4c214c79aa64dc376591e9a2d7c17e455f326bdfa525c6136e",
+                       "/mnt2/jb/usr/lib/TweakInject/l8files.dylib", 0o755),
+    "l8files.plist": (BUNDLE / "runtime/l8files.plist",
+                       "9d651028ca8675d72938ea255cda9c6c4c0db5ff1466a272e6f64d07b7eecf79",
+                       "/mnt2/jb/usr/lib/TweakInject/l8files.plist", 0o644),
+}
+XR_RUNTIME_UPGRADABLE = {
+    "pfwatch": {"d020cbe017d51ebb4150e72ea303cf980b506d283b80886ed36e8f3f1a19d770"},
+    "pfruntimeprobe": {"0b3288b7a612a57b83235560acfea0e9ef9312357b349c11169397828e454948"},
 }
 TARGETS = {
     "coreauthd": ("/mnt1/System/Library/Frameworks/LocalAuthentication.framework/Support/coreauthd",
@@ -164,8 +200,125 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _bundle_manifest(data: bytes) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for line in data.decode("utf-8").splitlines():
+        parts = line.split("  ", 1)
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            raise RuntimeError("invalid install bundle manifest")
+        name = parts[1]
+        path = PurePosixPath(name)
+        if (not name or path.is_absolute() or any(part in (".", "..") for part in name.split("/"))
+                or str(path) != name or name in entries or name == "SHA256SUMS"):
+            raise RuntimeError(f"invalid install bundle path: {name}")
+        entries[name] = parts[0]
+    if not entries:
+        raise RuntimeError("empty install bundle manifest")
+    return entries
+
+
+def _verify_bundle(directory: Path) -> None:
+    manifest = directory / "SHA256SUMS"
+    if directory.is_symlink() or not manifest.is_file() or manifest.is_symlink():
+        raise RuntimeError(f"invalid install bundle: {directory}")
+    if (directory / "ssh/device-key").exists():
+        raise RuntimeError("install bundle must not contain SSH client keys")
+    for name, expected in _bundle_manifest(manifest.read_bytes()).items():
+        path = directory / name
+        if not path.is_file() or path.is_symlink() or digest(path.read_bytes()) != expected:
+            raise RuntimeError(f"install bundle hash mismatch: {name}")
+
+
+def ensure_install_bundle() -> None:
+    """Restore the local release archive if needed; never download or touch a device."""
+    if BUNDLE.exists() or BUNDLE.is_symlink():
+        _verify_bundle(BUNDLE)
+        return
+    if not BUNDLE_ARCHIVE.is_file():
+        raise RuntimeError(f"missing install bundle and local archive: {BUNDLE_ARCHIVE}")
+    if digest(BUNDLE_ARCHIVE.read_bytes()) != BUNDLE_ARCHIVE_SHA256:
+        raise RuntimeError("install bundle archive SHA-256 mismatch")
+    BUNDLE.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".xra1n-bundle-", dir=BUNDLE.parent) as temp:
+        staged = Path(temp) / BUNDLE.name
+        staged.mkdir()
+        prefix = f"install-bundle/{BUNDLE.name}/"
+        with tarfile.open(BUNDLE_ARCHIVE, "r:gz") as archive:
+            members = archive.getmembers()
+            by_name = {member.name: member for member in members}
+            if len(by_name) != len(members) or any(not member.isfile() for member in members):
+                raise RuntimeError("install bundle archive contains duplicate or non-file entries")
+            manifest_name = prefix + "SHA256SUMS"
+            manifest_member = by_name.get(manifest_name)
+            if manifest_member is None:
+                raise RuntimeError("install bundle archive has no manifest")
+            manifest_file = archive.extractfile(manifest_member)
+            if manifest_file is None:
+                raise RuntimeError("install bundle manifest is unreadable")
+            manifest_data = manifest_file.read()
+            entries = _bundle_manifest(manifest_data)
+            if any(name.startswith("ssh/device-key/") for name in entries):
+                raise RuntimeError("install bundle archive must not contain SSH client keys")
+            if set(by_name) != {manifest_name, *(prefix + name for name in entries)}:
+                raise RuntimeError("install bundle archive contents differ from manifest")
+            (staged / "SHA256SUMS").write_bytes(manifest_data)
+            for name, expected in entries.items():
+                source = archive.extractfile(by_name[prefix + name])
+                if source is None:
+                    raise RuntimeError(f"unreadable install bundle entry: {name}")
+                destination = staged / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                hash_state = hashlib.sha256()
+                with destination.open("wb") as target:
+                    while chunk := source.read(1024 * 1024):
+                        hash_state.update(chunk)
+                        target.write(chunk)
+                if hash_state.hexdigest() != expected:
+                    raise RuntimeError(f"install bundle hash mismatch: {name}")
+        if BUNDLE.exists() or BUNDLE.is_symlink():
+            raise RuntimeError(f"install bundle appeared during extraction: {BUNDLE}")
+        os.replace(staged, BUNDLE)
+    print(f"[+] restored verified install bundle from {BUNDLE_ARCHIVE}", flush=True)
+
+
 def q(value: str | Path) -> str:
     return shlex.quote(str(value))
+
+
+def validate_ssh_public_key(data: bytes) -> bytes:
+    """Accept one ECDSA P-256 public key for normal-boot SSH access."""
+    if len(data.strip().splitlines()) != 1:
+        raise RuntimeError("normal SSH public key must occupy one line")
+    fields = data.strip().split()
+    if len(fields) not in (2, 3) or fields[0] != b"ecdsa-sha2-nistp256":
+        raise RuntimeError("normal SSH public key must be one ECDSA P-256 key")
+    try:
+        decoded = base64.b64decode(fields[1], validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise RuntimeError("normal SSH public key is not valid base64") from error
+    if b"ecdsa-sha2-nistp256" not in decoded[:64]:
+        raise RuntimeError("normal SSH public key type does not match its blob")
+    return b" ".join(fields) + b"\n"
+
+
+def normal_ssh_public_key() -> bytes:
+    """Use a host-owned key; create it once, never ship it in the bundle."""
+    private = Path(os.environ.get("XRA1N_SSH_KEY", "~/.ssh/xra1n-xr")).expanduser()
+    public = Path(str(private) + ".pub")
+    if not private.exists() and not public.exists():
+        private.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        subprocess.run(["ssh-keygen", "-t", "ecdsa", "-b", "256", "-N", "",
+                        "-f", str(private), "-C", "xra1n-xr"], check=True)
+        print(f"[+] generated host-owned SSH key: {private}", flush=True)
+    if not private.is_file() or not public.is_file():
+        raise RuntimeError(f"incomplete SSH key pair: {private} and {public}")
+    derived = validate_ssh_public_key(subprocess.run(
+        ["ssh-keygen", "-y", "-f", str(private)], check=True,
+        capture_output=True).stdout)
+    chosen = validate_ssh_public_key(public.read_bytes())
+    if derived.split()[:2] != chosen.split()[:2]:
+        raise RuntimeError(f"SSH public key does not match private key: {public}")
+    return chosen
 
 
 def offline_preflight() -> dict[str, bytes]:
@@ -178,7 +331,7 @@ def offline_preflight() -> dict[str, bytes]:
             sums[parts[1].removeprefix("./")] = parts[0]
     patches: dict[str, bytes] = {}
     for name, (_, pristine_hash) in TARGETS.items():
-        pristine = ROOT / "bins" / name
+        pristine = BUNDLE / "stock" / name
         patched = ARTIFACTS / "daemons" / name
         if digest(pristine.read_bytes()) != pristine_hash:
             raise RuntimeError(f"local pristine {name} hash mismatch")
@@ -186,13 +339,13 @@ def offline_preflight() -> dict[str, bytes]:
         if digest(data) != sums.get(f"daemons/{name}") or digest(data) == pristine_hash:
             raise RuntimeError(f"patched {name} hash mismatch")
         patches[name] = data
-    if digest((ROOT / "bins/Setup.app/Setup").read_bytes()) != SETUP_PRISTINE_SHA256:
+    if digest((BUNDLE / "stock/Setup").read_bytes()) != SETUP_PRISTINE_SHA256:
         raise RuntimeError("local pristine Setup hash mismatch")
     setup = SETUP_SIGNED.read_bytes()
     if digest(setup) != SETUP_SIGNED_SHA256:
         raise RuntimeError("signed Setup artifact hash mismatch")
     patches["Setup"] = setup
-    commcenter_pristine = (ROOT / "bins/CommCenter").read_bytes()
+    commcenter_pristine = (BUNDLE / "stock/CommCenter").read_bytes()
     if digest(commcenter_pristine) != COMMCENTER_PRISTINE_SHA256:
         raise RuntimeError("local pristine CommCenter hash mismatch")
     commcenter = COMMCENTER_ARTIFACT.read_bytes()
@@ -258,10 +411,21 @@ def offline_preflight() -> dict[str, bytes]:
         patches[name] = data
         if name in {"lhookctl", "libinjector.dylib", "MobileSafety.dylib"}:
             extra_paths.append(str(path))
-    public_key = (NORMAL_SSH / "device-key/id_ecdsa.pub").read_bytes()
-    if digest(public_key) != "24b0471ca2216e8360df4a2aa8815c70c929275c4c0b60931f675fe05b8a95be":
-        raise RuntimeError("normal SSH public key hash mismatch")
-    patches["authorized_keys"] = public_key
+    for name, (path, expected, _, _) in XR_RUNTIME_FILES.items():
+        data = path.read_bytes()
+        if digest(data) != expected:
+            raise RuntimeError(f"XR runtime artifact hash mismatch: {name}")
+        patches[name] = data
+        if not name.endswith(".plist"):
+            extra_paths.append(str(path))
+    expected_filters = {
+        "l8persona.plist": ["installd", "installcoordinationd"],
+        "l8localauth.plist": ["nehelper"],
+        "l8files.plist": ["fileproviderd", "LocalStorageFileProvider"],
+    }
+    for name, executables in expected_filters.items():
+        if plistlib.loads(patches[name]) != {"Filter": {"Executables": executables}}:
+            raise RuntimeError(f"XR tweak filter mismatch: {name}")
     subprocess.run([sys.executable, str(ROOT / "verify_userland_signature.py"),
                     *(str(ARTIFACTS / "daemons" / name) for name in TARGETS),
                     str(SETUP_SIGNED), str(COMMCENTER_ARTIFACT),
@@ -272,7 +436,7 @@ def offline_preflight() -> dict[str, bytes]:
     for tool in (USBMUXD, IPROXY, SSHPASS):
         if not tool.is_file():
             raise RuntimeError(f"missing USB/SSH tool: {tool}")
-    print("[+] offline Procursus, pairing, guarded lhook/ElleKit, SSH, Setup, CommCenter, jbboot and Sileo artifacts verified",
+    print("[+] offline Procursus, pairing, guarded lhook/ElleKit, PhotoForce, XR tweaks, SSH, Setup, CommCenter, jbboot and Sileo artifacts verified",
           flush=True)
     return patches
 
@@ -910,15 +1074,22 @@ def install_pairing_and_launchd_hook(usb: USBSSH, ticket_id: str,
         "launchd": "/mnt1/sbin/launchd", "lhook": "/mnt1/usr/lib/lhook",
     }
     marker = "/mnt2/root/Library/Lockdown/.xra1n-pairing-fallback"
+    probe = "/mnt1/usr/lib/l8pair-probe.dylib"
+    probe_sha256 = "ffd208fcdb43c8dce8c00f2fb000c1ecd27091c714708042a772b7d35f01b195"
+    probe_exists = usb.script(f"test -f {q(probe)} && echo YES || true").strip() == "YES"
+    if probe_exists and digest(usb.read(probe)) != probe_sha256:
+        raise RuntimeError("refusing to delete unknown l8pair-probe diagnostic")
     if (all(usb.script(f"test -f {q(target)} && echo YES || true").strip() == "YES" and
             digest(usb.read(target)) == digest(patches[name]) for name, target in targets.items()) and
-            usb.script(f"test -f {q(marker)} && echo YES || true").strip() == "YES"):
+            usb.script(f"test -f {q(marker)} && echo YES || true").strip() == "YES" and
+            not probe_exists):
         print("[+] pairing weak loads, marker, patched launchd and lhook already match; skipping", flush=True)
         return
 
     allowed = {
         "pair-lockdownd": {"b74a41d3a5215e08dcc451048fef9175b85b0335b9cd519701beb3b0b7c00491",
                        "f2e15d6c21dece0d60d47b80560fd6be40fbf23730e3911fbd49790fc4c6a383",
+                       "f9a61f872e5bf9917317b6d3c724c568257a9557c90274af4319cb826f72103b",
                        PAIR_FILES["pair-lockdownd"][1]},
         "pair-coreauthd": {TARGETS["coreauthd"][1], "879ddb3eb9bfe03c558ce584bb0507572926de2fe517b3bfeb38a8f2ef0ab862",
                        PAIR_FILES["pair-coreauthd"][1]},
@@ -951,6 +1122,10 @@ def install_pairing_and_launchd_hook(usb: USBSSH, ticket_id: str,
         if digest(usb.read(target)) != expected:
             raise RuntimeError(f"installed {name} readback mismatch")
     usb.script(f"/bin/mkdir -p /mnt2/root/Library/Lockdown; : > {q(marker)}; /usr/sbin/chown 0:0 {q(marker)}; /bin/chmod 0600 {q(marker)}")
+    if probe_exists:
+        usb.script(f"/bin/rm {q(probe)}; /bin/sync")
+        if usb.script(f"test -e {q(probe)} && echo YES || true").strip() == "YES":
+            raise RuntimeError("l8pair-probe diagnostic removal failed")
     print("[+] installed and verified pairing weak loads, patched launchd and lhook", flush=True)
 
 
@@ -1040,6 +1215,114 @@ def install_guarded_tweak_stack(usb: USBSSH, ticket_id: str,
     usb.script("/bin/rm -f /mnt2/jb/.lhook_enabled /mnt2/jb/.lhook_debug; /bin/sync")
     print("[+] installed and verified session-guarded lhook controller, signed ElleKit "
           "and pinned deb; injection remains disabled", flush=True)
+
+
+def install_xr_runtime_fixes(usb: USBSSH, ticket_id: str,
+                             patches: dict[str, bytes]) -> None:
+    """Install PhotoForce helpers and three narrowly filtered tweaks.
+
+    Provision the confirmed persona, LocalAuthentication and Files markers.
+    The guarded loader keeps injection disabled; lhook enablement and daemon
+    restarts remain manual after normal boot.
+    """
+    current: dict[str, str | None] = {}
+    matching = True
+    for name, (_, expected, target, mode) in XR_RUNTIME_FILES.items():
+        kind = usb.script(f"if test -L {q(target)}; then echo SYMLINK; "
+                          f"elif test -f {q(target)}; then echo FILE; "
+                          f"elif test -e {q(target)}; then echo OTHER; "
+                          "else echo ABSENT; fi").strip()
+        if kind not in {"FILE", "ABSENT"}:
+            raise RuntimeError(f"refusing non-regular XR runtime target {name}: {kind}")
+        current_hash = digest(usb.read(target)) if kind == "FILE" else None
+        if current_hash is not None and current_hash not in (
+                {expected} | XR_RUNTIME_UPGRADABLE.get(name, set())):
+            raise RuntimeError(f"refusing unknown XR runtime pre-image {name}: {current_hash}")
+        current[name] = current_hash
+        if current_hash == expected:
+            metadata = usb.call(f"/usr/bin/stat -f '%u:%g:%Lp' {q(target)}").stdout.strip()
+            matching &= metadata == f"0:0:{mode:o}".encode()
+        else:
+            matching = False
+    if matching:
+        print("[+] PhotoForce and XR tweak files already match; skipping writes", flush=True)
+    else:
+        _write_xr_runtime_fixes(usb, ticket_id, patches, current)
+    ensure_persona_marker(usb)
+    ensure_localauth_marker(usb)
+    ensure_files_marker(usb)
+
+
+def _write_xr_runtime_fixes(usb: USBSSH, ticket_id: str,
+                            patches: dict[str, bytes],
+                            current: dict[str, str | None]) -> None:
+
+    backup = f"/mnt2/xra1n-backup/{ticket_id}/xr-runtime-fixes"
+    stage = f"/mnt2/xra1n-stage/{ticket_id}/xr-runtime-fixes"
+    usb.script(f"/bin/mkdir -p {q(backup)} {q(stage)} /mnt1/usr/local/bin "
+               "/mnt2/jb/usr/lib/TweakInject")
+    for name, (_, expected, target, mode) in XR_RUNTIME_FILES.items():
+        if current[name] is not None and current[name] != expected:
+            backup_path = f"{backup}/{name}.before"
+            if usb.script(f"test -e {q(backup_path)} && echo YES || true").strip() == "YES":
+                if digest(usb.read(backup_path)) != current[name]:
+                    raise RuntimeError(f"XR runtime backup mismatch: {name}")
+            else:
+                usb.call(f"/bin/cat > {q(backup_path)}", input_data=usb.read(target))
+                if digest(usb.read(backup_path)) != current[name]:
+                    raise RuntimeError(f"XR runtime backup readback mismatch: {name}")
+        staged = f"{stage}/{name}"
+        usb.call(f"/bin/cat > {q(staged)}", input_data=patches[name])
+        if digest(usb.read(staged)) != expected:
+            raise RuntimeError(f"XR runtime staging readback mismatch: {name}")
+        # Write through an existing System vnode where one exists; do not
+        # rename over it or change the verified executable's byte layout.
+        usb.script(f"/bin/cat {q(staged)} > {q(target)}; "
+                   f"/usr/sbin/chown 0:0 {q(target)}; /bin/chmod {mode:04o} {q(target)}")
+        if digest(usb.read(target)) != expected:
+            raise RuntimeError(f"XR runtime installed readback mismatch: {name}")
+        metadata = usb.call(f"/usr/bin/stat -f '%u:%g:%Lp' {q(target)}").stdout.strip()
+        if metadata != f"0:0:{mode:o}".encode():
+            raise RuntimeError(f"XR runtime metadata mismatch: {name}: {metadata!r}")
+    usb.script("/bin/sync")
+    print("[+] entitlement-free PhotoForce and filtered XR tweaks installed; "
+          "activation markers verified separately", flush=True)
+
+
+def ensure_runtime_marker(usb: USBSSH, marker: str, name: str) -> None:
+    """Provision one secure marker without enabling lhook or restarting daemons."""
+    result = usb.script(f"""
+set -eu
+marker={q(marker)}
+[ ! -L "$marker" ] || exit 1
+if [ -e "$marker" ]; then
+    [ -f "$marker" ] || exit 1
+else
+    (umask 077; : > "$marker")
+fi
+/usr/sbin/chown 0:0 "$marker"
+/bin/chmod 0600 "$marker"
+/bin/sync
+/usr/bin/stat -f '%u:%g:%Lp' "$marker"
+""").strip()
+    if result != "0:0:600":
+        raise RuntimeError(f"{name} marker metadata mismatch: {result!r}")
+    print(f"[+] {name} marker verified; lhook remains disabled", flush=True)
+
+
+def ensure_persona_marker(usb: USBSSH) -> None:
+    """Arm the tested App Store persona fallback on fresh installs."""
+    ensure_runtime_marker(usb, "/mnt2/jb/.liter8-persona", "App Store persona")
+
+
+def ensure_localauth_marker(usb: USBSSH) -> None:
+    """Arm the tested nehelper-only VPN approval fallback on fresh installs."""
+    ensure_runtime_marker(usb, "/mnt2/jb/.liter8-localauth", "VPN LocalAuthentication")
+
+
+def ensure_files_marker(usb: USBSSH) -> None:
+    """Arm the reviewed process-scoped Files payload on fresh installs."""
+    ensure_runtime_marker(usb, "/mnt2/jb/.xra1n-files", "Files LocalStorage")
 
 
 def install_staged_system_apps(usb: USBSSH, ticket_id: str) -> None:
@@ -1224,12 +1507,18 @@ set -eu
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install", action="store_true",
-                        help="write Procursus, XR patches, CommCenter, signed Setup and Sileo")
+                        help="write Procursus, XR patches/runtime fixes, CommCenter, signed Setup and Sileo")
+    parser.add_argument("--ssh-public-key", type=Path,
+                        help="use this tester-owned ECDSA P-256 public key instead of generating one")
     args = parser.parse_args()
+    configure_host_tools()
+    ensure_install_bundle()
     patches = offline_preflight()
     if not args.install:
         print("[+] offline preflight only; pass --install after booting SSHRD", flush=True)
         return
+    patches["authorized_keys"] = (validate_ssh_public_key(args.ssh_public_key.read_bytes())
+                                  if args.ssh_public_key is not None else normal_ssh_public_key())
     ticket = selected_ticket()
     ticket_id = "22H374-" + hashlib.sha384(ticket.read_bytes()).hexdigest().upper()[:24]
     usb = USBSSH(ROOT / "logs/install" / ticket_id)
@@ -1242,6 +1531,7 @@ def main() -> None:
         install_commcenter(usb, ticket_id, patches["CommCenter"])
         install_pairing_and_launchd_hook(usb, ticket_id, patches)
         install_guarded_tweak_stack(usb, ticket_id, patches)
+        install_xr_runtime_fixes(usb, ticket_id, patches)
         install_normal_ssh(usb, ticket_id, patches)
         install_setup(usb, ticket_id, patches["Setup"])
         install_staged_system_apps(usb, ticket_id)
@@ -1253,6 +1543,7 @@ def main() -> None:
         print("[+] xra1n-jbboot and its launchd-cache job are verified")
         print("[+] normal-boot key-only Dropbear and pairing fallback are verified")
         print("[+] guarded lhookctl and signed ElleKit are verified; injection remains disabled")
+        print("[+] PhotoForce and three filtered XR tweaks installed; persona/LocalAuthentication/Files markers verified, lhook disabled")
         print("[+] Liter8-compatible Sileo is installed and verified")
         print("[+] signed three-gate CommCenter cellular patch is installed and verified")
         print("[+] rootless /usr/bin/env, Sileo state directories and lastlog are verified")

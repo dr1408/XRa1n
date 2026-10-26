@@ -103,8 +103,7 @@ jobs:
               -Wl,-install_name,/var/jb/usr/lib/TweakInject/l8localauth.dylib \
               -framework Foundation xr-runtime-fixes/l8localauth.m \
               -o "$OUT/l8localauth.${arch}.dylib"
-            # XR-only, marker-gated Files LocalStorage compatibility. Installed
-            # inactive and enabled only for a controlled live-boot test.
+            # XR-only, marker-gated Files LocalStorage compatibility.
             "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
               -fblocks -fobjc-arc -fvisibility=hidden -fno-common -Wall -Wextra -Werror \
               -dynamiclib -Wl,-not_for_dyld_shared_cache \
@@ -140,19 +139,6 @@ jobs:
           done
           rm -f "$OUT"/*.arm64 "$OUT"/*.arm64e \
                 "$OUT"/*.arm64.dylib "$OUT"/*.arm64e.dylib
-
-      - name: Build read-only Files diagnostic for XR
-        shell: bash
-        run: |
-          set -euo pipefail
-          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-          CLANG="$(xcrun --sdk iphoneos --find clang)"
-          OUT=work/xr-runtime-fixes/filesdiag
-          "$CLANG" -target arm64e-apple-ios18.0 -isysroot "$SDK" -Os \
-            -fobjc-arc -fblocks -Wall -Wextra -Werror \
-            -framework Foundation xr-runtime-fixes/filesdiag.m -o "$OUT"
-          ldid -Sxr-runtime-fixes/filesdiag.entitlements -Cadhoc "$OUT"
-          codesign --verify --strict "$OUT"
 
       - name: Verify artifact
         shell: bash
@@ -222,20 +208,12 @@ jobs:
             | grep -Fx 'PFPosterPathURLResourceValues'
           strings -a work/xr-runtime-fixes/pfwatch \
             | grep -Fx '/Applications/PosterBoard.app/PosterBoard'
-          test "$(lipo -archs work/xr-runtime-fixes/filesdiag)" = "arm64e"
-          codesign --verify --strict work/xr-runtime-fixes/filesdiag
-          ldid -e work/xr-runtime-fixes/filesdiag \
-            | grep -q 'com.apple.private.coreservices.lsaw'
-          ! ldid -e work/xr-runtime-fixes/filesdiag | grep -q 'task_for_pid-allow'
-          strings -a work/xr-runtime-fixes/filesdiag \
-            | grep -Fx 'PLUGIN_SUMMARY total=%lu localstorage=%u'
           file "$DYLIB"
           shasum -a 256 \
             work/xr-runtime-fixes/*.dylib \
             work/xr-runtime-fixes/*.plist \
             work/xr-runtime-fixes/pfruntimeprobe \
             work/xr-runtime-fixes/pfwatch \
-            work/xr-runtime-fixes/filesdiag \
             | tee work/xr-runtime-fixes/SHA256SUMS
 
       - name: Upload XR runtime fixes
@@ -253,7 +231,6 @@ jobs:
             work/xr-runtime-fixes/l8files.plist
             work/xr-runtime-fixes/pfruntimeprobe
             work/xr-runtime-fixes/pfwatch
-            work/xr-runtime-fixes/filesdiag
             work/xr-runtime-fixes/SHA256SUMS
           if-no-files-found: error
           retention-days: 14

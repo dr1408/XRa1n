@@ -14,10 +14,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+from host_tools import configure as configure_host_tools
+from boot_stage import require_stage_args
+
 from patch_devicetree import NORMAL_PATCHES, apply_patches, parse, resolve_path
 
 ROOT = Path(__file__).resolve().parent
 CFW = ROOT / "work/cfw"
+PRISTINE = ROOT / "work/pristine-cfw"
 SOURCES = ROOT / "work/normal"
 BOOTSET = ROOT / "work/normal-bootset"
 KERNEL = ROOT / "kernelcache.patched-0x891-full-aks.im4p"
@@ -73,30 +77,34 @@ def component(items: dict, name: str) -> Path:
     return path
 
 
-def make_sources(items: dict) -> None:
+def pristine_component(items: dict, name: str) -> Path:
+    path = PRISTINE / items[name]["Info"]["Path"]
+    if not path.is_file():
+        raise RuntimeError(f"missing pristine {name}: {path}; prepare erase CFW first")
+    if hashlib.sha384(path.read_bytes()).digest() != items[name]["Digest"]:
+        raise RuntimeError(f"pristine {name} does not match BuildManifest: {path}")
+    return path
+
+
+def make_sources(items: dict, serial: bool = False) -> None:
     SOURCES.mkdir(parents=True, exist_ok=True)
     for name in ("iBSS", "iBEC"):
         stock = SOURCES / f"{name}.raw"
-        # work/cfw/iBEC was modified by earlier restore experiments and no
-        # longer has the guarded pristine bytes. Use the archived stock raw.
-        archived = ROOT / "work/restore/iBEC.restore.raw" if name == "iBEC" else None
-        if archived is not None:
-            shutil.copy2(archived, stock)
-        else:
-            run("img4", "-i", component(items, name), "-o", stock)
+        run("img4", "-i", pristine_component(items, name), "-o", stock)
         if digest(stock) != STOCK_IBOOT_SHA256:
             raise RuntimeError(f"{name} pristine iBoot source changed; refusing to patch")
         output = Path(str(stock) + ".patched")
         output.unlink(missing_ok=True)
         with (SOURCES / f"{name}.patch.log").open("w") as log:
             subprocess.run([sys.executable, str(ROOT / "patch_iboot.py"),
-                            str(stock), "normal", "--serial"], check=True,
+                            str(stock), "normal", "--serial" if serial else "--no-serial"], check=True,
                            stdout=log, stderr=subprocess.STDOUT)
         if not output.is_file() or output.read_bytes() == stock.read_bytes():
             raise RuntimeError(f"{name} normal boot patch failed")
+        require_stage_args(output, "normal", serial)
 
     dt_stock = SOURCES / "DeviceTree.raw"
-    run("img4", "-i", component(items, "DeviceTree"), "-o", dt_stock)
+    run("img4", "-i", pristine_component(items, "DeviceTree"), "-o", dt_stock)
     dt_patched = SOURCES / "DeviceTree.normal.raw"
     root = parse(dt_stock.read_bytes())
     results = apply_patches(root, NORMAL_PATCHES)
@@ -116,21 +124,26 @@ def make_sources(items: dict) -> None:
     print(f"[+] normal sources ready: {SOURCES}")
 
 
-def build(items: dict, ticket: Path, kernel: Path) -> None:
+def build(items: dict, ticket: Path, kernel: Path, serial: bool = False) -> None:
     if not ticket.is_file() or not kernel.is_file():
         raise RuntimeError("fresh ticket and downloaded patched kernel artifact are required")
+    for name in ("iBSS", "iBEC"):
+        require_stage_args(SOURCES / f"{name}.raw.patched", "normal", serial)
     meta = ticket.with_suffix(".json")
     if meta.is_file() and json.loads(meta.read_text()).get("sha256") != digest(ticket):
         raise RuntimeError("ticket metadata hash mismatch")
     with tempfile.TemporaryDirectory(prefix="xra1n-normal-") as temp:
         stage = Path(temp)
         shutil.copy2(SOURCES / "iBSS.raw.patched", stage / "iBSS.raw")
-        run("img4", "-i", ROOT / "work/restore-bootset/iBEC.img4", "-o", stage / "iBEC.img4",
-            "-R", SOURCES / "iBEC.raw.patched", "-M", ticket, "-T", "ibec")
+        # The pristine-IM4P/-R wrapper and even a restricted 0x891 LZFSE
+        # repack stalled in patched iBSS. The plain -A wrapper is the format
+        # that completed iBEC/go and booted this n841ap through launchd.
+        run("img4", "-i", SOURCES / "iBEC.raw.patched", "-o", stage / "iBEC.img4",
+            "-A", "-T", "ibec", "-M", ticket)
         for source, target, fourcc in COMPONENTS:
             run("img4", "-i", component(items, source), "-o", stage / target,
                 "-M", ticket, "-T", fourcc)
-        run("img4", "-i", component(items, "DeviceTree"),
+        run("img4", "-i", pristine_component(items, "DeviceTree"),
             "-o", stage / "DeviceTree.img4", "-R", SOURCES / "DeviceTree.normal.raw",
             "-M", ticket, "-T", "rdtr")
         run("img4", "-i", kernel, "-o", stage / "Kernelcache.img4",
@@ -161,6 +174,7 @@ def build(items: dict, ticket: Path, kernel: Path) -> None:
         names = sorted(p for p in BOOTSET.iterdir() if p.suffix == ".img4" or p.name == "iBSS.raw")
         records = {p.name: {"bytes": p.stat().st_size, "sha256": digest(p)} for p in names}
         document = {"schema": 1, "mode": "normal", "profileID": "iphone11,8-n841ap-22H374",
+                    "serial": serial,
                     "ticketSha256": digest(ticket), "kernelArtifactSha256": digest(kernel),
                     "kernelUSBRestrictedModeRestorePredicate": usb_policy_patch,
                     "artifacts": records}
@@ -177,11 +191,13 @@ def main() -> None:
     parser.add_argument("--sources-only", action="store_true", help="prepare normal iBSS/iBEC/DT without a ticket")
     parser.add_argument("--ticket", type=Path, default=TICKET)
     parser.add_argument("--kernel", type=Path, default=KERNEL)
+    parser.add_argument("--serial", action="store_true", help="route kernel console to DCSD UART")
     args = parser.parse_args()
+    configure_host_tools()
     items = identity()
-    make_sources(items)
+    make_sources(items, args.serial)
     if not args.sources_only:
-        build(items, args.ticket.resolve(), args.kernel.resolve())
+        build(items, args.ticket.resolve(), args.kernel.resolve(), args.serial)
 
 
 if __name__ == "__main__":

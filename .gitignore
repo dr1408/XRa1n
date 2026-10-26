@@ -1,2 +1,40 @@
-bins/launchd.plist
-bins/launchd.plist.sig
+# Local research notes; verified release instructions belong in README files.
+/LOCAL_PLAN.md
+/KERNEL_PLAN.md
+
+# Generated release assets and extracted install bundle.
+/install-bundle/iphone11,8-22H374/
+/dist/
+/userland-output-22H374/
+/RestoreRamDisk.*.im4p
+/kernelcache.patched-*.im4p
+/payloads/bootstrap_1900.tar.zst
+/payloads/org.coolstar.sileo_*.deb
+/bins/Setup.patched.signed
+/bins/Setup.app/Setup.a2s
+/bins/launchd.plist
+/bins/launchd.plist.sig
+
+# Older copies replaced by the pinned tools/host/linux-aarch64 bundle.
+/tools/idevicerestore
+/tools/lib/
+
+# Local IPSW extraction, tickets, SSH keys, logs and scratch state.
+/work/
+/logs/
+/tickets/
+/shsh/
+/.run/
+/.irecovery
+/firmware/
+*.ipsw
+/restore_*.log
+/checksums.txt.sha1
+
+# External checkouts and Python test/build caches.
+/liter8/
+/Liter8/
+/usbliter8-fun/
+/.pytest_cache/
+__pycache__/
+*.pyc
