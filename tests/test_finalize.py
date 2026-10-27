@@ -21,6 +21,17 @@ class FinalizerTests(unittest.TestCase):
         self.assertEqual(finalizer.hashlib.sha256(finalizer.PREF_DEB.read_bytes()).hexdigest(),
                          finalizer.PREF_DEB_SHA)
 
+    def test_newterm_helpers_are_pinned(self):
+        bundle = ROOT / "install-bundle/iphone11,8-22H374"
+        for path, want in (
+            (finalizer.NEWTERM_LOGIN, finalizer.NEWTERM_LOGIN_SHA),
+            (finalizer.NEWTERM_HELPER, finalizer.NEWTERM_HELPER_SHA),
+        ):
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_relative_to(bundle))
+                self.assertEqual(
+                    finalizer.hashlib.sha256(path.read_bytes()).hexdigest(), want)
+
     def test_check_and_apply_render_valid_shell(self):
         real_run = subprocess.run
         for mode in ("--check", "--apply"):
@@ -41,6 +52,54 @@ class FinalizerTests(unittest.TestCase):
                 self.assertNotIn(b"uicache -u /var/jb/Applications/Sileo.app", script)
                 self.assertLess(script.index(b"apt-get check"),
                                 script.index(b"uicache -p /Applications/Sileo.app"))
+                # Without --newterm-root the appfix block must be gated off and
+                # must carry no base64 payload for the two helpers.
+                self.assertIn(b"newterm_requested=0", script)
+                self.assertIn(b"newterm_login_data=''", script)
+                self.assertIn(b"newterm_helper_data=''", script)
+
+    def test_newterm_root_flag_arms_block(self):
+        real_run = subprocess.run
+        for mode in ("--check", "--apply"):
+            with self.subTest(mode=mode):
+                with patch.object(
+                    sys, "argv", ["xra1n-finalize.py", mode, "--newterm-root"]
+                ), patch.object(finalizer.subprocess, "run") as mocked:
+                    mocked.return_value.returncode = 0
+                    self.assertEqual(finalizer.main(), 0)
+                    script = mocked.call_args.kwargs["input"]
+                self.assertEqual(real_run(["/bin/sh", "-n"], input=script).returncode, 0)
+                self.assertIn(b"newterm_requested=1", script)
+                self.assertIn(
+                    f"newterm_login_sha={finalizer.NEWTERM_LOGIN_SHA}".encode(),
+                    script,
+                )
+                self.assertIn(
+                    f"newterm_helper_sha={finalizer.NEWTERM_HELPER_SHA}".encode(),
+                    script,
+                )
+                # Payloads should be present and plausibly large (base64 of the
+                # ~165KB helpers).
+                self.assertIn(b"newterm_login_data='", script)
+                self.assertIn(b"newterm_helper_data='", script)
+                self.assertNotIn(b"newterm_login_data=''", script)
+                self.assertNotIn(b"newterm_helper_data=''", script)
+                # Device-side flow: marker, backup discipline, staged install.
+                self.assertIn(
+                    b"newterm_app_binary=/var/jb/Applications/NewTerm.app/NewTerm",
+                    script,
+                )
+                self.assertIn(b".liter8-real", script)
+                self.assertIn(b".xra1n-new", script)
+                # Hard refusal when NewTerm is absent (soft branch must be gone).
+                self.assertIn(
+                    b"fail 'NewTerm is not installed; install it from Sileo "
+                    b"first, then re-run with --newterm-root'",
+                    script,
+                )
+                self.assertNotIn(
+                    b"NewTerm not installed; --newterm-root cannot verify", script
+                )
 
 
 if __name__ == "__main__":

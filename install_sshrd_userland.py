@@ -29,7 +29,7 @@ from host_tools import configure as configure_host_tools, tool as host_tool
 ROOT = Path(__file__).resolve().parent
 BUNDLE = ROOT / "install-bundle/iphone11,8-22H374"
 BUNDLE_ARCHIVE = ROOT / "dist/install-bundle-iphone11.8-22H374.tar.gz"
-BUNDLE_ARCHIVE_SHA256 = "5d1ef9f0a789c29db6454d453cf0a86640e4f88f5563e8e2fad8257644691a87"
+BUNDLE_ARCHIVE_SHA256 = "39f0c2c3cb9bd529176669b35d979b21e63ebf0276814def24c8b4cebc4cfbeb"
 ARCHIVE = BUNDLE / "bootstrap/bootstrap_1900.tar.zst"
 ARTIFACTS = BUNDLE / "userland"
 USBMUXD = host_tool("usbmuxd")

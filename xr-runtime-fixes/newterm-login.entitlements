@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Bisected AMFI-safe ad-hoc set from Liter8-iPad8 spawnprobe/e_both.plist.
+      newterm-login invokes posix_spawn with persona-99 attributes to produce
+      a uid/gid 0 child from a nosuid-mounted binary; that path requires
+      persona-mgmt and spawn-subsystem-root. The remaining four are needed to
+      survive AMFI as ad-hoc on this kernel configuration. get-task-allow is
+      deliberately absent: AMFI kills ad-hoc binaries that claim it.
+    -->
+    <key>platform-application</key><true/>
+    <key>com.apple.private.security.no-sandbox</key><true/>
+    <key>com.apple.private.security.no-container</key><true/>
+    <key>com.apple.private.skip-library-validation</key><true/>
+    <key>com.apple.private.persona-mgmt</key><true/>
+    <key>com.apple.private.spawn-subsystem-root</key><true/>
+</dict>
+</plist>

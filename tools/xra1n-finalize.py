@@ -29,6 +29,10 @@ PREF_DEB_SHA = "eaacb5204e13dee166cc44763566bbbd565fbf3cf1ecc25b1a2f432b6bee6f86
 PREF_PAYLOAD_SHA = "b873329f3293916e167ef0783f6052d6cbd27a4a20ccfa201889031eed621987"
 PREF_SIGNED_SHA = "42e5680ca80649d1c1624c3c3a75cbdefe0d1bf5b9424db05de55a0b8cdc77a5"
 PREF_PLIST_SHA = "0c4adfdb2c5b035f7577103263af7fecdb389887ca92f4b56d76d271352adde9"
+NEWTERM_LOGIN = ROOT / "install-bundle/iphone11,8-22H374/apps/newterm/newterm-login"
+NEWTERM_HELPER = ROOT / "install-bundle/iphone11,8-22H374/apps/newterm/newterm-helper"
+NEWTERM_LOGIN_SHA = "3bf97fca5d6d337fb96f706ff87eaee01e8c2b90f28a41c1d65873578f860767"
+NEWTERM_HELPER_SHA = "aac62f50d8aa5ddbbee15cd0274d1907ec1e68af320b133fbf2b135e545f26a6"
 
 
 def main() -> int:
@@ -36,6 +40,11 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="read-only status (default)")
     mode.add_argument("--apply", action="store_true", help="complete missing steps")
+    parser.add_argument(
+        "--newterm-root",
+        action="store_true",
+        help="opt-in: install/verify NewTerm root-login appfix (needs NewTerm on device)",
+    )
     args = parser.parse_args()
     ensure_install_bundle()
     signer = SIGNER.read_bytes()
@@ -48,6 +57,18 @@ def main() -> int:
     payload = base64.b64encode(signer).decode()
     config = base64.b64encode(cfg).decode()
     pref_payload = base64.b64encode(pref_deb).decode()
+    newterm_requested = 1 if args.newterm_root else 0
+    newterm_login_data = ""
+    newterm_helper_data = ""
+    if args.newterm_root:
+        login_bytes = NEWTERM_LOGIN.read_bytes()
+        helper_bytes = NEWTERM_HELPER.read_bytes()
+        if hashlib.sha256(login_bytes).hexdigest() != NEWTERM_LOGIN_SHA:
+            raise RuntimeError("NewTerm login adapter hash mismatch in bundle")
+        if hashlib.sha256(helper_bytes).hexdigest() != NEWTERM_HELPER_SHA:
+            raise RuntimeError("NewTerm login helper hash mismatch in bundle")
+        newterm_login_data = base64.b64encode(login_bytes).decode()
+        newterm_helper_data = base64.b64encode(helper_bytes).decode()
     # One SSH session: the USB proxy and pairing are owned by ssh-normal.sh.
     script = f'''#!/bin/sh
 set -eu
@@ -72,6 +93,15 @@ signer_data='{payload}'
 cfg_data='{config}'
 signer=/var/jb/usr/libexec/xra1n/tweaksign
 cfg=/var/jb/etc/dpkg/dpkg.cfg.d/xra1n-tweaksign
+newterm_requested={newterm_requested}
+newterm_login_sha={NEWTERM_LOGIN_SHA}
+newterm_helper_sha={NEWTERM_HELPER_SHA}
+newterm_login_data='{newterm_login_data}'
+newterm_helper_data='{newterm_helper_data}'
+newterm_login=/var/jb/usr/bin/login
+newterm_helper=/var/jb/Applications/NewTerm.app/NewTermLoginHelper
+newterm_login_backup=/var/jb/usr/bin/login.liter8-real
+newterm_helper_backup=/var/jb/Applications/NewTerm.app/NewTermLoginHelper.liter8-real
 loader=/var/jb/etc/rc.d/ellekit-loader
 diverted=/var/jb/etc/rc.d/ellekit-loader.xra1n-disabled
 legacy_diverted=/var/jb/etc/rc.d/ellekit-loader.liter8-disabled
@@ -356,6 +386,81 @@ else
     sileo_registered || fail 'Sileo registration readback did not select patched system app'
     echo '[+] patched system Sileo registration restored'
 fi
+# NewTerm root-login appfix: opt-in, idempotent. Replaces the stock login and
+# NewTermLoginHelper with the signed persona-99 spawn adapter and tty helper
+# verified in work/xr-runtime-fixes. Stock originals are preserved as .liter8-real
+# once; existing backups are never overwritten. If NewTerm is not installed,
+# this is a soft skip in check mode and a hard refusal in apply mode.
+if [ "$newterm_requested" = 1 ]; then
+    # --newterm-root is explicit opt-in, so missing NewTerm is a user error
+    # in both check and apply modes. Use the app's Mach-O as the marker; the
+    # directory is not sufficient because dpkg can leave an empty NewTerm.app
+    # behind after an uninstall.
+    newterm_app_binary=/var/jb/Applications/NewTerm.app/NewTerm
+    [ -f "$newterm_app_binary" ] && [ ! -L "$newterm_app_binary" ] \
+        || fail 'NewTerm is not installed; install it from Sileo first, then re-run with --newterm-root'
+    [ -f "$newterm_login" ] && [ ! -L "$newterm_login" ] || fail 'login binary missing or symlink'
+    [ -f "$newterm_helper" ] && [ ! -L "$newterm_helper" ] || fail 'NewTermLoginHelper missing or symlink'
+    login_installed=0
+    helper_installed=0
+    [ "$(sha "$newterm_login")" = "$newterm_login_sha" ] && login_installed=1
+    [ "$(sha "$newterm_helper")" = "$newterm_helper_sha" ] && helper_installed=1
+    if [ "$login_installed" = 1 ] && [ "$helper_installed" = 1 ]; then
+        # Backups must exist alongside an installed state so rollback is possible.
+        [ -f "$newterm_login_backup" ] && [ ! -L "$newterm_login_backup" ] \
+            || fail 'login adapter installed but .liter8-real backup missing'
+        [ -f "$newterm_helper_backup" ] && [ ! -L "$newterm_helper_backup" ] \
+            || fail 'NewTermLoginHelper installed but .liter8-real backup missing'
+        echo '[=] NewTerm root-login appfix installed and verified'
+    elif [ "$mode" = check ]; then
+        echo '[?] NewTerm root-login appfix not installed or drifted'
+        incomplete=1
+    else
+        command -v base64 >/dev/null || fail 'base64 missing for NewTerm staging'
+        [ -n "$newterm_login_data" ] && [ -n "$newterm_helper_data" ] \
+            || fail 'NewTerm helper payload is empty; this is an orchestration bug'
+        # First-run backup: never overwrite an existing .liter8-real so rollback
+        # retains the stock binaries even across repeated applies and upgrades.
+        for pair in "$newterm_login:$newterm_login_backup" "$newterm_helper:$newterm_helper_backup"; do
+            target=${{pair%%:*}}
+            backup=${{pair#*:}}
+            if [ ! -e "$backup" ]; then
+                [ -f "$target" ] && [ ! -L "$target" ] || fail "refusing to back up unsafe path: $target"
+                cp -p "$target" "$backup" || fail "could not back up $target"
+                chown 0:0 "$backup"
+            else
+                [ -f "$backup" ] && [ ! -L "$backup" ] || fail "existing backup is unsafe: $backup"
+            fi
+        done
+        # Stage into a sibling path and only move into place after readback.
+        if [ "$login_installed" != 1 ]; then
+            staged="$newterm_login.xra1n-new"
+            printf '%s' "$newterm_login_data" | base64 -d > "$staged"
+            chown 0:0 "$staged"
+            chmod 0755 "$staged"
+            if [ "$(sha "$staged")" != "$newterm_login_sha" ]; then
+                rm -f "$staged"
+                fail 'login adapter staging hash mismatch'
+            fi
+            mv "$staged" "$newterm_login"
+        fi
+        if [ "$helper_installed" != 1 ]; then
+            staged="$newterm_helper.xra1n-new"
+            printf '%s' "$newterm_helper_data" | base64 -d > "$staged"
+            chown 0:0 "$staged"
+            chmod 0755 "$staged"
+            if [ "$(sha "$staged")" != "$newterm_helper_sha" ]; then
+                rm -f "$staged"
+                fail 'NewTermLoginHelper staging hash mismatch'
+            fi
+            mv "$staged" "$newterm_helper"
+        fi
+        [ "$(sha "$newterm_login")" = "$newterm_login_sha" ] || fail 'login adapter readback mismatch'
+        [ "$(sha "$newterm_helper")" = "$newterm_helper_sha" ] || fail 'NewTermLoginHelper readback mismatch'
+        echo '[+] NewTerm root-login appfix installed'
+    fi
+fi
+
 echo '[+] XRa1n finalization inspection finished; injection state unchanged'
 [ "$incomplete" = 0 ] || exit 2
 '''

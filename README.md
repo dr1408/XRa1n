@@ -61,7 +61,7 @@ at the following repository paths:
 | `kernelcache.patched-0x891-full-aks.im4p` | `900fb9e106ef5c9d9a7085add1ca0133071f9a0e41a3969c69af6d49cb5f0cbe` |
 | `RestoreRamDisk.patched.im4p` | `6fc6e23cbd5a9955aad9d5e4f4025c2145c9e82719660c8bbf751813935f5f76` |
 | `RestoreRamDisk.sshrd.im4p` | `9c858c5ac79ba302626de338e028f4b306d22cc9228eceb2c57d2c8d33a5ff53` |
-| `dist/install-bundle-iphone11.8-22H374.tar.gz` | `5d1ef9f0a789c29db6454d453cf0a86640e4f88f5563e8e2fad8257644691a87` |
+| `dist/install-bundle-iphone11.8-22H374.tar.gz` | `39f0c2c3cb9bd529176669b35d979b21e63ebf0276814def24c8b4cebc4cfbeb` |
 
 Check the bundled host tools before using the device:
 
@@ -126,6 +126,29 @@ tweaks to load. This step is manual and must be repeated after a new normal
 boot; do not run it from SSHRD. See the detailed
 [restore](BOOT_WORKFLOW.md), [SSHRD install](POST_SSHRD_INSTALL.md), and
 [normal boot](NORMAL_BOOT.md) guides for checks and stage-specific behavior.
+
+### Optional: NewTerm root shell
+
+NewTerm's bundled login path cannot gain root on XR 22H374 because the Data
+volume is mounted `nosuid`, so a stock NewTerm launch opens as `mobile` and
+exits before a shell appears. The optional `--newterm-root` finalizer flag
+installs a signed `persona-99` spawn adapter over `/var/jb/usr/bin/login` and
+a replacement `NewTermLoginHelper` with the correct tty and environment setup.
+Both stock originals are preserved as `.liter8-real`. This is opt-in because
+it only takes effect at the device owner's explicit request.
+
+After installing **NewTerm** from Sileo (`ws.hbang.Terminal`):
+
+```sh
+python3 tools/xra1n-finalize.py --check --newterm-root
+python3 tools/xra1n-finalize.py --apply --newterm-root
+python3 tools/xra1n-finalize.py --check --newterm-root
+```
+
+Re-run `--apply --newterm-root` after any Sileo upgrade of NewTerm so the
+helper is restored on top of the fresh package. The `.liter8-real` backups
+are preserved across re-applies. Without the flag, the finalizer never
+touches `login` or NewTerm.
 
 ## Credits
 

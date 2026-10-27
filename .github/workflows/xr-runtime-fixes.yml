@@ -137,6 +137,30 @@ jobs:
             # the separate guarded AMFI task-port kernel patch is tested next.
             ldid -S -Cadhoc "$OUT/${name}"
           done
+          # NewTerm appfix adapters. Replace /var/jb/usr/bin/login and
+          # /var/jb/Applications/NewTerm.app/NewTermLoginHelper. The Data
+          # volume is nosuid on XR, so login cannot gain root through the
+          # setuid bit; newterm-login spawns a persona-99 child with uid/gid
+          # 0 and re-execs real login as root. No entitlements required.
+          for arch in arm64 arm64e; do
+            TARGET="${arch}-apple-ios18.0"
+            for name in newterm-login newterm-helper; do
+              "$CLANG" -target "$TARGET" -isysroot "$SDK" -Os \
+                -fblocks -Wall -Wextra -Werror \
+                xr-runtime-fixes/${name}.c \
+                -o "$OUT/${name}.${arch}"
+            done
+          done
+          for name in newterm-login newterm-helper; do
+            lipo -create "$OUT/${name}.arm64" "$OUT/${name}.arm64e" \
+              -output "$OUT/${name}"
+          done
+          # newterm-login needs the bisected AMFI-safe entitlement set to call
+          # posix_spawn with persona-99 attributes. newterm-helper has no such
+          # need and is adhoc-signed without entitlements.
+          ldid -Sxr-runtime-fixes/newterm-login.entitlements -Cadhoc \
+            "$OUT/newterm-login"
+          ldid -S -Cadhoc "$OUT/newterm-helper"
           rm -f "$OUT"/*.arm64 "$OUT"/*.arm64e \
                 "$OUT"/*.arm64.dylib "$OUT"/*.arm64e.dylib
 
@@ -199,21 +223,54 @@ jobs:
           assert plist == {'Filter': {'Executables': ['fileproviderd', 'LocalStorageFileProvider']}}, plist
           PY
           for BIN in work/xr-runtime-fixes/pfruntimeprobe \
-                     work/xr-runtime-fixes/pfwatch; do
+                     work/xr-runtime-fixes/pfwatch \
+                     work/xr-runtime-fixes/newterm-helper; do
             test "$(lipo -archs "$BIN")" = "arm64 arm64e"
             codesign --verify --strict "$BIN"
             test -z "$(ldid -e "$BIN")"
           done
+          # newterm-login must carry the six-entitlement set and nothing else.
+          test "$(lipo -archs work/xr-runtime-fixes/newterm-login)" = "arm64 arm64e"
+          codesign --verify --strict work/xr-runtime-fixes/newterm-login
+          # Fat binary: ldid -e prints one plist per slice; keep only the first.
+          ldid -e work/xr-runtime-fixes/newterm-login \
+            | awk '/<\?xml/{p=1} p{print} /<\/plist>/{if (p) exit}' \
+            | tee /tmp/newterm-login.ents
+          plutil -lint /tmp/newterm-login.ents
+          python3 - <<'PY'
+          import plistlib
+          with open('/tmp/newterm-login.ents', 'rb') as f:
+              ents = plistlib.load(f)
+          expected = {
+              'platform-application': True,
+              'com.apple.private.security.no-sandbox': True,
+              'com.apple.private.security.no-container': True,
+              'com.apple.private.skip-library-validation': True,
+              'com.apple.private.persona-mgmt': True,
+              'com.apple.private.spawn-subsystem-root': True,
+          }
+          assert ents == expected, ents
+          PY
           strings -a work/xr-runtime-fixes/pfruntimeprobe \
             | grep -Fx 'PFPosterPathURLResourceValues'
           strings -a work/xr-runtime-fixes/pfwatch \
             | grep -Fx '/Applications/PosterBoard.app/PosterBoard'
+          strings -a work/xr-runtime-fixes/newterm-login \
+            | grep -Fx 'iPhone11,8'
+          strings -a work/xr-runtime-fixes/newterm-login \
+            | grep -Fx '22H374'
+          strings -a work/xr-runtime-fixes/newterm-login \
+            | grep -Fx '/var/jb/usr/bin/login.liter8-real'
+          strings -a work/xr-runtime-fixes/newterm-helper \
+            | grep -Fx -e '-NewTermLoginHelper'
           file "$DYLIB"
           shasum -a 256 \
             work/xr-runtime-fixes/*.dylib \
             work/xr-runtime-fixes/*.plist \
             work/xr-runtime-fixes/pfruntimeprobe \
             work/xr-runtime-fixes/pfwatch \
+            work/xr-runtime-fixes/newterm-login \
+            work/xr-runtime-fixes/newterm-helper \
             | tee work/xr-runtime-fixes/SHA256SUMS
 
       - name: Upload XR runtime fixes
@@ -231,6 +288,8 @@ jobs:
             work/xr-runtime-fixes/l8files.plist
             work/xr-runtime-fixes/pfruntimeprobe
             work/xr-runtime-fixes/pfwatch
+            work/xr-runtime-fixes/newterm-login
+            work/xr-runtime-fixes/newterm-helper
             work/xr-runtime-fixes/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
