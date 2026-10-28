@@ -14,16 +14,20 @@ Tethered jailbreak for **iPhone XR (iPhone11,8 / n841ap)** on **iOS 18.7.10
 - Erase restore and tethered iOS boot
 - SSH and USB pairing
 - Wi-Fi, Bluetooth, and VPN
-- Outgoing calls
+- Calls and SMS
 - Camera, flashlight, and audio
 - Photos, Files, and wallpapers
 - App Store downloads
 - Sileo, APT, and tweaks
 
+> Calls and SMS worked after restoring activation records from a
+> pre-jailbreak backup. Back up the device's activation records before
+> performing the erase-restore jailbreak.
+
 ### Not working
 
-- Incoming calls
 - iCloud services
+- App push notifications
 
 ## Host and files
 
@@ -61,7 +65,7 @@ at the following repository paths:
 | `kernelcache.patched-0x891-full-aks.im4p` | `900fb9e106ef5c9d9a7085add1ca0133071f9a0e41a3969c69af6d49cb5f0cbe` |
 | `RestoreRamDisk.patched.im4p` | `6fc6e23cbd5a9955aad9d5e4f4025c2145c9e82719660c8bbf751813935f5f76` |
 | `RestoreRamDisk.sshrd.im4p` | `9c858c5ac79ba302626de338e028f4b306d22cc9228eceb2c57d2c8d33a5ff53` |
-| `dist/install-bundle-iphone11.8-22H374.tar.gz` | `39f0c2c3cb9bd529176669b35d979b21e63ebf0276814def24c8b4cebc4cfbeb` |
+| `dist/install-bundle-iphone11.8-22H374.tar.gz` | `bc4ce4585c9b04faafd07996143e6b0f6fa099738727eded5cce984f33b577c2` |
 
 Check the bundled host tools before using the device:
 
@@ -154,7 +158,7 @@ touches `login` or NewTerm.
 
 - **[Paradigm Shift](https://web.archive.org/web/20260618141609/https://ps.tc/pages/blog-usbliter8.html):** original usbliter8 SecureROM exploit.
 - **wh1te4ever and [usbliter8-fun](https://github.com/wh1te4ever/usbliter8-fun):** early custom-firmware and ramdisk work.
-- **0xjohnnydev and [his usbliter8-fun fork](https://github.com/0xjohnnydev/usbliter8-fun):** standard-iPhone-11 port and documented restore/boot work that informed the XR workflow.
+- **0xjohnnydev and [his usbliter8-fun fork](https://github.com/0xjohnnydev/usbliter8-fun):** standard-iPhone-11 port and documented restore/boot work that informed the XR workflow. XRa1n's XR-adapted file-backed `wifid` credential shim follows his [Wi-Fi shim implementation](https://github.com/0xjohnnydev/usbliter8-fun/commit/4eb88b100ff26b9653b8bba777ecf948aadf9cf6), which in turn identifies [surrealra1n commit `a52b864`](https://github.com/pwnerblu/surrealra1n/commit/a52b864540c3a5013762755cdd73d4f2769308f5) as the earlier file-backed keychain-shim design.
 - **Xplo8E and [Liter8](https://github.com/Xplo8E/Liter8):** firmware patching and boot workflow, restore/userland work, and the basis for several XR runtime fixes.
 - **gru2007 and [Liter8-iPad8](https://github.com/gru2007/Liter8-iPad8):** task-port and Files compatibility research used in the XR port.
 - **[Procursus](https://github.com/ProcursusTeam/Procursus):** rootless bootstrap and package repository.

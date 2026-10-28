@@ -70,8 +70,29 @@ class SSHRDInstallerTests(unittest.TestCase):
         paths.extend(path for path, _ in installer.LAUNCHD_HOOK_FILES.values())
         paths.extend(path for path, _ in installer.TWEAK_STACK_FILES.values())
         paths.extend(path for path, _, _, _ in installer.ICON_HELPER_FILES.values())
+        paths.extend(path for path, _, _, _ in installer.WIFI_FILES.values())
         paths.extend(path for path, _, _, _ in installer.XR_RUNTIME_FILES.values())
         self.assertTrue(all(path.is_relative_to(installer.BUNDLE) for path in paths))
+
+    def test_wifi_artifacts_are_pinned_and_installer_is_guarded(self) -> None:
+        expected = {
+            "wifid": ("/mnt1/usr/sbin/wifid", 0o755),
+            "wifi-keychain-shim.dylib": (
+                "/mnt2/jb/usr/lib/wifi-keychain-shim.dylib", 0o755),
+        }
+        self.assertEqual(set(installer.WIFI_FILES), set(expected))
+        for name, (source, sha256, target, mode) in installer.WIFI_FILES.items():
+            self.assertEqual((target, mode), expected[name])
+            self.assertEqual(installer.digest(source.read_bytes()), sha256)
+        self.assertEqual(installer.digest((installer.ROOT / "bins/wifid").read_bytes()),
+                         installer.WIFID_PRISTINE_SHA256)
+        source = inspect.getsource(installer.install_wifi_shim)
+        self.assertIn("wifid.pristine", source)
+        self.assertIn("refusing unknown wifid pre-image", source)
+        self.assertIn("refusing unknown Wi-Fi shim pre-image", source)
+        self.assertIn("wifid rollback", source)
+        self.assertNotIn("killall", source)
+        self.assertNotIn("kickstart", source)
 
     def test_scoped_icon_helpers_are_pinned_and_installed_without_restart(self) -> None:
         expected = {

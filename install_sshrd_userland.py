@@ -29,7 +29,7 @@ from host_tools import configure as configure_host_tools, tool as host_tool
 ROOT = Path(__file__).resolve().parent
 BUNDLE = ROOT / "install-bundle/iphone11,8-22H374"
 BUNDLE_ARCHIVE = ROOT / "dist/install-bundle-iphone11.8-22H374.tar.gz"
-BUNDLE_ARCHIVE_SHA256 = "39f0c2c3cb9bd529176669b35d979b21e63ebf0276814def24c8b4cebc4cfbeb"
+BUNDLE_ARCHIVE_SHA256 = "bc4ce4585c9b04faafd07996143e6b0f6fa099738727eded5cce984f33b577c2"
 ARCHIVE = BUNDLE / "bootstrap/bootstrap_1900.tar.zst"
 ARTIFACTS = BUNDLE / "userland"
 USBMUXD = host_tool("usbmuxd")
@@ -120,6 +120,16 @@ ICON_HELPER_FILES = {
                    "a29451a70697fd5c9cbd93e7a717ea93f5c7c49ff5422f7f5e52550aad455550",
                    "/mnt2/jb/usr/bin/sbextissue", 0o755),
 }
+WIFI_FILES = {
+    "wifid": (BUNDLE / "userland/wifi/wifid",
+              "8c935c98ccca9e64c0e875b2fa58b19d0881e287790a544a50a26d14c8e472e3",
+              "/mnt1/usr/sbin/wifid", 0o755),
+    "wifi-keychain-shim.dylib": (
+        BUNDLE / "userland/wifi/wifi-keychain-shim.dylib",
+        "6176dcb7832c17a42c58ee8b8c58a0acc3b4ff2dadc1316928508ee7c536260f",
+        "/mnt2/jb/usr/lib/wifi-keychain-shim.dylib", 0o755),
+}
+WIFID_PRISTINE_SHA256 = "e982be216989321f4f82d2fc0bf1bd69b69745cba5c92106fd7b8f70a29bd8b4"
 XR_RUNTIME_FILES = {
     "pfwatch": (BUNDLE / "runtime/pfwatch",
                 "b4e460dd2aa6af4b181f1606bb00cb6a3162fef3da9b763727d34ba3cd81b822",
@@ -425,6 +435,15 @@ def offline_preflight() -> dict[str, bytes]:
             raise RuntimeError(f"icon-helper artifact hash mismatch: {name}")
         patches[name] = data
         extra_paths.append(str(path))
+    for name, (path, expected, _, _) in WIFI_FILES.items():
+        data = path.read_bytes()
+        if digest(data) != expected:
+            raise RuntimeError(f"Wi-Fi artifact hash mismatch: {name}")
+        manifest_name = f"wifi/{name}"
+        if sums.get(manifest_name) != expected:
+            raise RuntimeError(f"Wi-Fi artifact manifest mismatch: {name}")
+        patches[name] = data
+        extra_paths.append(str(path))
     for name, (path, expected, _, _) in XR_RUNTIME_FILES.items():
         data = path.read_bytes()
         if digest(data) != expected:
@@ -450,7 +469,7 @@ def offline_preflight() -> dict[str, bytes]:
     for tool in (USBMUXD, IPROXY, SSHPASS):
         if not tool.is_file():
             raise RuntimeError(f"missing USB/SSH tool: {tool}")
-    print("[+] offline Procursus, pairing, guarded lhook/ElleKit, icon helpers, PhotoForce, XR tweaks, SSH, Setup, CommCenter, jbboot and Sileo artifacts verified",
+    print("[+] offline Procursus, pairing, guarded lhook/ElleKit, icon helpers, Wi-Fi shim, PhotoForce, XR tweaks, SSH, Setup, CommCenter, jbboot and Sileo artifacts verified",
           flush=True)
     return patches
 
@@ -1275,6 +1294,111 @@ def install_icon_helpers(usb: USBSSH, ticket_id: str,
           flush=True)
 
 
+def install_wifi_shim(usb: USBSSH, ticket_id: str,
+                      patches: dict[str, bytes]) -> None:
+    """Install pinned weak-load wifid and its file-backed AirPort shim.
+
+    The pristine System daemon is backed up on Data before any write.  An
+    already-patched daemon is accepted only when that pristine backup remains
+    verifiable.  Unknown daemon or shim pre-images are never overwritten.
+    No service is started or restarted from SSHRD.
+    """
+    wifid_source, wifid_hash, wifid_target, wifid_mode = WIFI_FILES["wifid"]
+    shim_name = "wifi-keychain-shim.dylib"
+    _, shim_hash, shim_target, shim_mode = WIFI_FILES[shim_name]
+    del wifid_source  # Paths are validated by offline_preflight.
+
+    current_wifid = digest(usb.read(wifid_target))
+    shim_kind = usb.script(
+        f"if test -L {q(shim_target)}; then echo SYMLINK; "
+        f"elif test -f {q(shim_target)}; then echo FILE; "
+        f"elif test -e {q(shim_target)}; then echo OTHER; else echo ABSENT; fi"
+    ).strip()
+    if shim_kind not in {"FILE", "ABSENT"}:
+        raise RuntimeError(f"refusing non-regular Wi-Fi shim target: {shim_kind}")
+    current_shim = digest(usb.read(shim_target)) if shim_kind == "FILE" else None
+    if current_wifid not in {WIFID_PRISTINE_SHA256, wifid_hash}:
+        raise RuntimeError(f"refusing unknown wifid pre-image: {current_wifid}")
+    if current_shim not in {None, shim_hash}:
+        raise RuntimeError(f"refusing unknown Wi-Fi shim pre-image: {current_shim}")
+
+    backup_dir = f"/mnt2/xra1n-backup/{ticket_id}/wifi"
+    backup = f"{backup_dir}/wifid.pristine"
+    stage = f"/mnt2/xra1n-stage/{ticket_id}/wifi"
+    if current_wifid == wifid_hash:
+        if digest(usb.read(backup)) != WIFID_PRISTINE_SHA256:
+            raise RuntimeError("already-patched wifid lacks its pristine on-device backup")
+        if current_shim == shim_hash:
+            print("[+] patched wifid, Wi-Fi shim and pristine backup already verified; skipping",
+                  flush=True)
+            return
+
+    usb.script(f"/bin/mkdir -p {q(backup_dir)} {q(stage)} /mnt2/jb/usr/lib")
+    if current_wifid == WIFID_PRISTINE_SHA256:
+        usb.script(f"""
+set -eu
+test -f {q(wifid_target)} && test ! -L {q(wifid_target)}
+if [ ! -e {q(backup)} ]; then /bin/cp -p {q(wifid_target)} {q(backup)}; fi
+""")
+    if digest(usb.read(backup)) != WIFID_PRISTINE_SHA256:
+        raise RuntimeError("on-device pristine wifid backup mismatch")
+
+    staged_wifid = f"{stage}/wifid"
+    staged_shim = f"{stage}/{shim_name}"
+    usb.call(f"/bin/cat > {q(staged_wifid)}", input_data=patches["wifid"])
+    usb.call(f"/bin/cat > {q(staged_shim)}", input_data=patches[shim_name])
+    if digest(usb.read(staged_wifid)) != wifid_hash:
+        raise RuntimeError("staged patched wifid hash mismatch")
+    if digest(usb.read(staged_shim)) != shim_hash:
+        raise RuntimeError("staged Wi-Fi shim hash mismatch")
+
+    shim_was_absent = current_shim is None
+    changed_wifid = current_wifid != wifid_hash
+    try:
+        usb.script(f"""
+set -eu
+/bin/cat {q(staged_shim)} > {q(shim_target)}
+/usr/sbin/chown 0:0 {q(shim_target)}
+/bin/chmod {shim_mode:04o} {q(shim_target)}
+/bin/cat {q(staged_wifid)} > {q(wifid_target)}
+/usr/sbin/chown 0:0 {q(wifid_target)}
+/bin/chmod {wifid_mode:04o} {q(wifid_target)}
+/bin/sync
+""")
+        if digest(usb.read(wifid_target)) != wifid_hash:
+            raise RuntimeError("installed patched wifid readback mismatch")
+        if digest(usb.read(shim_target)) != shim_hash:
+            raise RuntimeError("installed Wi-Fi shim readback mismatch")
+        for name, (_, _, target, mode) in WIFI_FILES.items():
+            metadata = usb.call(f"/usr/bin/stat -f '%u:%g:%Lp' {q(target)}").stdout.strip()
+            if metadata != f"0:0:{mode:o}".encode():
+                raise RuntimeError(f"installed Wi-Fi metadata mismatch: {name}: {metadata!r}")
+    except Exception:
+        if changed_wifid:
+            try:
+                usb.script(f"/bin/cat {q(backup)} > {q(wifid_target)}; "
+                           f"/usr/sbin/chown 0:0 {q(wifid_target)}; "
+                           f"/bin/chmod {wifid_mode:04o} {q(wifid_target)}")
+                if digest(usb.read(wifid_target)) != WIFID_PRISTINE_SHA256:
+                    print("[!] wifid rollback readback FAILED", file=sys.stderr)
+            except Exception as error:
+                print(f"[!] wifid rollback FAILED: {error}", file=sys.stderr)
+        if shim_was_absent:
+            try:
+                usb.script(f"/bin/rm -f {q(shim_target)}")
+            except Exception as error:
+                print(f"[!] Wi-Fi shim rollback FAILED: {error}", file=sys.stderr)
+        raise
+
+    record = (f"{wifid_hash}  wifid\n{shim_hash}  {shim_name}\n").encode()
+    record_path = f"{backup_dir}/installed.sha256"
+    usb.call(f"/bin/cat > {q(record_path)}", input_data=record)
+    if usb.read(record_path) != record:
+        raise RuntimeError("on-device Wi-Fi install record mismatch")
+    print("[+] patched wifid, file-backed Wi-Fi shim and pristine backup verified",
+          flush=True)
+
+
 def install_xr_runtime_fixes(usb: USBSSH, ticket_id: str,
                              patches: dict[str, bytes]) -> None:
     """Install PhotoForce helpers and three narrowly filtered tweaks.
@@ -1590,6 +1714,7 @@ def main() -> None:
         install_pairing_and_launchd_hook(usb, ticket_id, patches)
         install_guarded_tweak_stack(usb, ticket_id, patches)
         install_icon_helpers(usb, ticket_id, patches)
+        install_wifi_shim(usb, ticket_id, patches)
         install_xr_runtime_fixes(usb, ticket_id, patches)
         install_normal_ssh(usb, ticket_id, patches)
         install_setup(usb, ticket_id, patches["Setup"])
@@ -1603,6 +1728,7 @@ def main() -> None:
         print("[+] normal-boot key-only Dropbear and pairing fallback are verified")
         print("[+] guarded lhookctl and signed ElleKit are verified; injection remains disabled")
         print("[+] iconservicesagent helper and sbextissue are installed; no service restarted")
+        print("[+] patched wifid and file-backed AirPort credential shim are installed; pristine wifid backup verified")
         print("[+] PhotoForce and three filtered XR tweaks installed; persona/LocalAuthentication/Files markers verified, lhook disabled")
         print("[+] Liter8-compatible Sileo is installed and verified")
         print("[+] signed three-gate CommCenter cellular patch is installed and verified")

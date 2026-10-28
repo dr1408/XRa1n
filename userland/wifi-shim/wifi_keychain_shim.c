@@ -13,6 +13,10 @@
 #include <pthread.h>
 #include <stdlib.h>
 
+/* Private Security constant used by wifid and exported at runtime.  The
+ * macOS-15 iPhoneOS SDK used by CI omits its declaration. */
+extern const CFStringRef kSecUseSystemKeychain;
+
 #define STORE_PATH \
   "/private/var/preferences/SystemConfiguration/com.xra1n.wifi-passwords.plist"
 
