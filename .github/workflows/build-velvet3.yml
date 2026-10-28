@@ -1,0 +1,50 @@
+name: Build Velvet 3
+
+on:
+  workflow_dispatch:
+    inputs:
+      velvet_ref:
+        description: Velvet3 branch, tag, or commit to build
+        required: true
+        default: master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-velvet3-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build rootless Velvet 3 package
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      THEOS_PACKAGE_SCHEME: rootless
+    steps:
+      - name: Check out Velvet 3
+        uses: actions/checkout@v4
+        with:
+          repository: dr1408/Velvet3
+          ref: ${{ inputs.velvet_ref }}
+          path: velvet3
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: brew install ldid xz dpkg
+
+      - name: Check out Theos
+        run: git clone --quiet --recursive https://github.com/theos/theos.git "$THEOS"
+
+      - name: Build and verify
+        working-directory: velvet3
+        run: bash tools/ci-build.sh
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: velvet3-deb
+          path: velvet3/packages/*.deb
+          if-no-files-found: error
