@@ -173,6 +173,36 @@ jobs:
           print('[+] release-only lockdownd hash and original entitlements verified')
           PY
 
+      - name: Build XR Wi-Fi credential shim and weak-load wifid
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p test_wifid_weakload.py -v
+          mkdir -p work/output/wifi
+          sh userland/wifi-shim/build.sh
+          cp userland/wifi-shim/wifi-keychain-shim.dylib work/output/wifi/
+          python3 patch_wifid_weakload.py bins/wifid \
+            --output work/output/wifi/wifid
+          python3 userland/liter8/resign_pagehashes.py \
+            work/output/wifi/wifid --apply
+          python3 verify_userland_signature.py \
+            work/output/wifi/wifid \
+            work/output/wifi/wifi-keychain-shim.dylib
+          otool -L work/output/wifi/wifid \
+            | grep -F '/var/jb/usr/lib/wifi-keychain-shim.dylib'
+          cmp <(ldid -e bins/wifid) <(ldid -e work/output/wifi/wifid)
+          test -z "$(ldid -e work/output/wifi/wifi-keychain-shim.dylib)"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import patch_wifid_weakload as p
+          before = Path('bins/wifid').read_bytes()
+          after = Path('work/output/wifi/wifid').read_bytes()
+          assert hashlib.sha256(before).hexdigest() == p.SOURCE_SHA256
+          assert len(before) == len(after)
+          print('[+] pinned wifid, weak dependency, signature and entitlements verified')
+          PY
+
       - name: Build and sign Liter8-compatible hook payloads
         shell: bash
         run: |
@@ -200,6 +230,10 @@ jobs:
           pairing/lockdownd: guarded weak /usr/lib/xra1n-pair.dylib dependency;
                    no diagnostic l8pair-probe load; original signature's code
                    slots repaired and original entitlements preserved.
+          wifi/wifid: guarded weak /var/jb/usr/lib/wifi-keychain-shim.dylib
+                   dependency with stock signature metadata and repaired slots.
+          wifi/wifi-keychain-shim.dylib: XR-only file-backed AirPort credential
+                   adapter; no lockdownd or pairing behavior.
           hook/: Liter8-derived universal arm64+arm64e signed hook payloads.
           setup/Setup: XR 22H374 Setup executable, 58 class-owned methods
                        patched and ad-hoc signed with Liter8's original
