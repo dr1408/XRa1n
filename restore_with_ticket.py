@@ -145,8 +145,8 @@ def main() -> None:
     idevicerestore = require_file(args.idevicerestore, "idevicerestore")
     usbliter8ctl = None if args.restore_only else require_file(args.usbliter8ctl, "usbliter8ctl")
     proxy_script = require_file(LITER8_SCRIPTS / "tss_proxy.py", "Liter8 TSS proxy")
-    ca_bundle = require_file(args.ca_bundle, "Apple TSS CA bundle")
-    verify_tss_tls(ca_bundle)
+    ca_path = require_file(args.ca_bundle, "Apple TSS CA bundle")
+    verify_tss_tls(ca_path)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     restore_log = ROOT / "logs" / "restore" / f"restore-{timestamp}.log"
@@ -193,7 +193,7 @@ def main() -> None:
                  "--bind", "127.0.0.1", "--port", "0",
                  "--ready-file", str(ready_file),
                  "--profile-id", args.profile_id,
-                 "--ca-bundle", str(ca_bundle)]
+                 "--ca-bundle", str(ca_path)]
             if args.restore_only:
                 proxy_command += ["--expected-ticket-sha256", saved_ticket_hash]
             else:
