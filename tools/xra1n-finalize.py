@@ -192,6 +192,12 @@ elif [ "$mode" = check ]; then
     echo '[?] APT dependencies broken; a guarded fix is needed'
     incomplete=1
 else
+    # A freshly staged bootstrap can have package lists that predate the
+    # package-manager and libkrw provider packages required by `essential`.
+    # Refresh only when repair is actually needed; a healthy finalization
+    # remains fully idempotent and does not contact repositories.
+    apt-get update || fail 'APT package-list refresh failed'
+    echo '[+] APT package lists refreshed'
     plan=$(apt-get -s -f install) || fail 'APT cannot simulate dependency repair'
     if printf '%s\n' "$plan" | grep -q '^Remv '; then
         fail 'APT repair would remove packages; refusing automatic repair'

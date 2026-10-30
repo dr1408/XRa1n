@@ -30,9 +30,12 @@ stops the operation rather than being overwritten.
 An existing compatible Liter8 diversion is recognized without replacing it.
 
 After ElleKit, the finalizer runs `apt-get check`. Only if dependencies are
-broken does `--apply` simulate `apt-get -f install`, refuse any removal or a
-plan changing more than 20 packages, then perform the repair and recheck. A
-healthy installation is never modified by this step.
+broken does `--apply` refresh APT's package lists, simulate
+`apt-get -f install`, refuse any removal or a plan changing more than 20
+packages, then perform the repair and recheck. This refresh lets APT resolve
+the packaged Sileo and libkrw provider required by the staged bootstrap. A
+healthy installation is never modified and does not contact repositories in
+this step.
 
 The final step installs `tools/xra1n-tweaksign.sh` and an XRa1n-owned dpkg
 post-invoke entry. The hook signs only regular, non-ad-hoc TweakInject dylibs,

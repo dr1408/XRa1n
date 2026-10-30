@@ -52,6 +52,10 @@ class FinalizerTests(unittest.TestCase):
                 self.assertNotIn(b"uicache -u /var/jb/Applications/Sileo.app", script)
                 self.assertLess(script.index(b"apt-get check"),
                                 script.index(b"uicache -p /Applications/Sileo.app"))
+                self.assertIn(b"apt-get update || fail 'APT package-list refresh failed'",
+                              script)
+                self.assertLess(script.index(b"apt-get update"),
+                                script.index(b"apt-get -s -f install"))
                 # Without --newterm-root the appfix block must be gated off and
                 # must carry no base64 payload for the two helpers.
                 self.assertIn(b"newterm_requested=0", script)
