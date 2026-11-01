@@ -26,8 +26,12 @@ Tethered jailbreak for **iPhone XR (iPhone11,8 / n841ap)** on **iOS 18.7.10
 
 ### Not working
 
-- iCloud services
+- iCloud login and apps login
 - App push notifications
+- Passcode and Face ID
+
+These issues are related to the AKS/SEP boot state. Contributions toward
+diagnosing or fixing them are welcome.
 
 ## Host and files
 
